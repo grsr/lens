@@ -1,5 +1,4 @@
-; a 4-voice drum kit (kick / tom / snare / hat) driven by a built-in beat. Same mono
-; sum on both audio outs; patch them through external panners or to L/R for spread.
+; a 4-voice drum kit (kick / tom / snare / hat) built natively in loupe.
 ;   switch-z up     = beat at clock rate (clocked by pulse-in 1, or internal tempo if unpatched)
 ;   switch-z down   = STUTTER: beat rolls at 4x while held
 ;   knob-main = wavefold distortion     audio-out 1/2 = mixed kit (same on both)
@@ -26,10 +25,10 @@
   (def snare-t (onsets snare-beat beatclk))
   (def hat-t   (onsets hat-beat   beatclk))
 
-  (def kick  (tone-drum  kick-t  24 36 1400))
-  (def tom   (tone-drum  tom-t   45 18 700))
-  (def snare (noise-drum snare-t 1400 350))
-  (def hat   (noise-drum hat-t   3600 90))
+  (def kick  (tone-drum  kick-t  44 60 20))
+  (def tom   (tone-drum  tom-t   55 36   20))
+  (def snare (noise-drum snare-t 800  5))
+  (def hat   (noise-drum hat-t   4000 1))
 
   (<- audio-out-1 (wavefold (mix kick snare tom hat :unity) knob-main))
   (<- audio-out-2 (wavefold (mix kick snare tom hat :unity) knob-main))
