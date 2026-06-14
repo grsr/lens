@@ -77,6 +77,21 @@ There are three handy constants always in scope: `vmin` (0), `vmid` (2048),
 and `vmax` (4095). You'll see them in patches as shorthand for "off",
 "middle", "full".
 
+The card's CV input jacks are voltage-neutral hardware, so Loupe gives
+you two ways to read one: `cv-uni-N` (raw 0..vmax, unpatched reads
+midpoint) for things like positions or levels, and `cv-bi-N` (bipolar
+around 0, unpatched reads 0) for things you want to SUM onto a knob as
+modulation. Picking the right one at the call site avoids the surprise
+of an unpatched jack contributing a hidden +vmid when you add it to
+something else.
+
+`knob-main`, `knob-x`, and `knob-y` come pre-smoothed (a one-pole
+filter kills the LSB jitter you'd otherwise hear when the knob feeds
+v/oct or any integer mapping) and pre-detented at 0, 2048, 4095 (so
+full-CCW, noon, and full-CW snap cleanly). If you want the raw,
+instant-response reading, `knob-main-raw` / `-x-raw` / `-y-raw` are
+also in scope.
+
 ## Builtins
 
 This is a starting handful, not a reference. There are more, they're being

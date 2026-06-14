@@ -1,5 +1,7 @@
 ; a dub delay: a resonant low-pass sits inside the loop, so closing the cutoff darkens
 ; the echoes as they recirculate. main = delay time, x = cutoff, y = feedback.
+;   patch: source -> audio-in-1; audio-out-1 -> Mix. audio-out-2 is the dry input echoed,
+;          useful as a dry sum if you split the source upstream.
 (patch
   (def buf (audio :seconds 1.5))
   (<- buf

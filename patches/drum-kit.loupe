@@ -1,8 +1,9 @@
 ; a 4-voice stereo drum kit (kick / tom / snare / hat) driven by live inputs or a built-in beat.
-;   switch-z middle = LIVE (pulse-in 1/2 = kick/tom, cv-in 1/2 = snare/hat)
+;   switch-z middle = LIVE (pulse-in 1/2 = kick/tom, cv-uni 1/2 = snare/hat triggers)
 ;   switch-z up     = built-in beat (clocked by pulse-in 1, or internal tempo if unpatched)
 ;   switch-z down   = STUTTER: beat rolls at 4x while held
 ;   knob-main = distortion (wavefold over the mix)     audio-out 1/2 = stereo kit
+;   patch: audio-out 1/2 -> Mix (stereo).
 
 (def tone-drum (fn (:trig :pitch :sweep :decay => :out)
   (def amp  (envelope :trig trig :decay decay))
@@ -23,8 +24,8 @@
 
   (def kick-t  (if (switch-z :middle) pulse-in-1     (onsets kick-beat beatclk)))
   (def tom-t   (if (switch-z :middle) pulse-in-2     (onsets tom-beat beatclk)))
-  (def snare-t (if (switch-z :middle) (edge cv-in-1) (onsets snare-beat beatclk)))
-  (def hat-t   (if (switch-z :middle) (edge cv-in-2) (onsets hat-beat beatclk)))
+  (def snare-t (if (switch-z :middle) (edge cv-uni-1) (onsets snare-beat beatclk)))
+  (def hat-t   (if (switch-z :middle) (edge cv-uni-2) (onsets hat-beat beatclk)))
 
   (def kick  (tone-drum  kick-t  24 36 1400))
   (def tom   (tone-drum  tom-t   45 18 700))

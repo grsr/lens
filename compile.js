@@ -66,8 +66,22 @@ const DEFAULT_OCT = 2;
 const LITERAL_BASE = 32;  // must match tape.h kLiteralBase
 const POOL_START   = 512; // must match tape.h kPoolStart. Sequence tapes [0,512); literal pool [512,CONTROL_BYTES).
 // Standard prelude: shadowable defs for vmax/vmid/vmin, master, hardware names, scales, rhythms.
-const HARDWARE = `(def knob-main (knob :main)) (def knob-x (knob :x)) (def knob-y (knob :y))
-(def cv-in-1 (cv-in 1)) (def cv-in-2 (cv-in 2))
+// Knobs are detented at 0 / midpoint / vmax (within +-96) so full-CCW/noon/full-CW
+// snap past ADC LSB jitter (which otherwise drifts patches like the Turing machine
+// past chance thresholds even with the pot stationary). `detent` is a PURE chain so
+// it inherits the knob's EVERY_CTRL rate; no extra audio-rate cost. `knob-*-raw`
+// gives the raw pot for cases that want instant gate-style response.
+const HARDWARE = `(def knob-main-raw (knob :main)) (def knob-x-raw (knob :x)) (def knob-y-raw (knob :y))
+(def knob-main (detent knob-main-raw 0 2048 4095))
+(def knob-x    (detent knob-x-raw    0 2048 4095))
+(def knob-y    (detent knob-y-raw    0 2048 4095))
+; CV inputs come in two flavours; pick the one that matches your intent.
+;   cv-uni-N : raw 0..vmax. Unpatched reads vmid (the midpoint), so this is what
+;              you want when the CV is a positive control like a level or a tape index.
+;   cv-bi-N  : bipolar around 0 (-vmid..+vmid). Unpatched reads 0, so this is what
+;              you want when you're SUMMING the CV onto a knob as modulation.
+(def cv-uni-1 (cv-in 1)) (def cv-uni-2 (cv-in 2))
+(def cv-bi-1  (sub (cv-in 1) vmid)) (def cv-bi-2 (sub (cv-in 2) vmid))
 (def audio-in-1 (audio-in 1)) (def audio-in-2 (audio-in 2))
 (def pulse-in-1 (pulse-in 1)) (def pulse-in-2 (pulse-in 2))
 (def switch-z (outputs (pos (switch-pos)) (up (eq (switch-pos) 2)) (middle (eq (switch-pos) 1)) (down (eq (switch-pos) 0)))) `;
@@ -767,43 +781,56 @@ class Compiler {
       }
       // (sine/triangle/saw/square [pitch|:note N|:hz N|:rate c] [:fm m|:pm m] [:depth D] [:sync s] [:width w])
       case "sine": case "triangle": case "saw": case "square": {
+        // Pitch always goes through an injected phasor. The phasor takes :note/:hz/:rate/
+        // :tempo/:cents/:sync/:phase and now :fm/:depth too. The shape just reads the
+        // phasor's phase+inc and renders the waveform, with :pm modulating the lookup
+        // phase at the shape itself (no integration needed for PM).
         const shape = { sine: 0, triangle: 1, saw: 2, square: 3 }[head];
-        let noteNode = null, fmNode = null, pm = 0, depth = 0, depthStream = null, syncNode = null, widthNode = null, rateArgs = [], k = 0;
+        let noteNode = null, fmNode = null, pmNode = null, depth = 0, depthStream = null;
+        let syncNode = null, widthNode = null, rateArgs = [], k = 0;
         if (a[0] !== undefined && !String(a[0]).startsWith(":")) { noteNode = a[0]; k = 1; }
         for (; k < a.length; k++) {
           if      (a[k] === ":note") { const v = noteValue(a[++k]); if (v === null) throw new Error("(" + head + " :note X): not a note name: " + a[k]); noteNode = String(v); }
           else if (a[k] === ":midi") noteNode = a[++k];
-          else if (a[k] === ":fm")    { fmNode = a[++k]; pm = 0; }  // linear FM (phase increment mod)
-          else if (a[k] === ":pm")    { fmNode = a[++k]; pm = 4; }  // phase modulation (DX-style)
+          else if (a[k] === ":fm")    fmNode = a[++k];                                // linear FM at the phasor
+          else if (a[k] === ":pm")    pmNode = a[++k];                                // phase mod at the shape
           else if (a[k] === ":depth") { const v = a[++k];
             if (Array.isArray(v)) { depthStream = v; depth = 127; }
             else depth = this.int(v); }
           else if (a[k] === ":sync")  syncNode = a[++k];
-          else if (a[k] === ":width" || a[k] === ":pwm") widthNode = a[++k];   // pulse width 0..VMAX (vmid=50%)
+          else if (a[k] === ":width" || a[k] === ":pwm") widthNode = a[++k];
           else if (a[k] === ":hz" || a[k] === ":khz" || a[k] === ":rate"
                 || a[k] === ":cents" || a[k] === ":phase") rateArgs.push(a[k], a[++k]);
         }
-        let pitch;
-        if (rateArgs.length) {
-          const pargs = ["phasor"];
-          if (noteNode !== null) pargs.push(noteNode);
-          pargs.push(...rateArgs);
-          if (syncNode !== null) { pargs.push(":sync", syncNode); syncNode = null; }
-          pitch = this.compile(pargs);
-        } else {
-          pitch = noteNode !== null ? this.compile(noteNode) : -1;
+        if (fmNode !== null && pmNode !== null)
+          throw new Error("(" + head + " ...): :fm and :pm are alternatives, not both");
+        // Collapse :depth-stream into the modulator at compile time (it's a VCA on the mod).
+        let mod = fmNode !== null ? fmNode : pmNode;
+        if (depthStream !== null && mod !== null) mod = ["vca", mod, depthStream];
+        const pargs = ["phasor"];
+        if (noteNode !== null) pargs.push(noteNode);
+        pargs.push(...rateArgs);
+        if (syncNode !== null) pargs.push(":sync", syncNode);
+        if (fmNode !== null) {
+          pargs.push(":fm", mod);
+          if (depth !== 0 && depthStream === null) pargs.push(":depth", String(depth));
         }
-        if (depthStream !== null && fmNode !== null) fmNode = ["vca", fmNode, depthStream];
-        const o = { in_a: pitch, in_b: fmNode !== null ? this.compile(fmNode) : -1,
-          array_idx: depth, param: shape | pm, clock_from: syncNode !== null ? this.compile(syncNode) : -1 };
+        const pitch = this.compile(pargs);
+        const o = { in_a: pitch,
+          in_b:      pmNode !== null ? this.compile(mod) : -1,
+          array_idx: pmNode !== null ? depth : 0,
+          param:     shape | (pmNode !== null ? 4 : 0) };
         if (head === "square" && widthNode !== null) o.param_from = this.compile(widthNode);
         return this.emit(this.node("shape", o), "audio");
       }
       case "phasor": {
-        // (phasor [note|:hz N|:khz N|:rate c] [:cents c] [:phase deg] [:sync s])
-        // param mode: 0=NOTE, 1=RATE, 2=HZ (compile-time exact), 3=TEMPO.
+        // (phasor [note|:hz N|:khz N|:rate c|:tempo c] [:cents c] [:phase deg] [:sync s]
+        //         [:fm modulator [:depth 0..127]])
+        // param: bits 0-1 = mode (0=NOTE, 1=RATE, 2=HZ, 3=TEMPO);
+        //        bits 2-11 = :phase offset (1024 steps per turn);
+        //        bits 12-18 = :fm :depth (0..127), nonzero implies FM enabled when param_from is set.
         const o = { param: 0 };
-        let k = 0;
+        let k = 0, fmDepth = 0;
         if (a[0] !== undefined && !String(a[0]).startsWith(":")) { o.in_a = this.compile(a[0]); k = 1; }
         for (; k < a.length; k++) {
           if (a[k] === ":hz" || a[k] === ":khz") {
@@ -814,14 +841,17 @@ class Compiler {
             o.param = (o.param & ~3) | 2;
             o._hz = hz;   // analysis hint (not serialized): used by interval pass for slow LFOs
           } else if (a[k] === ":rate") { o.in_a = this.compile(a[++k]); o.param = (o.param & ~3) | 1; }
-          else if (a[k] === ":tempo") { o.in_a = this.compile(a[++k]); o.param = (o.param & ~3) | 3; }  // 0.25..~30 Hz slice
+          else if (a[k] === ":tempo") { o.in_a = this.compile(a[++k]); o.param = (o.param & ~3) | 3; }
           else if (a[k] === ":sync")  { o.clock_from = this.compile(a[++k]); }
           else if (a[k] === ":cents") { o.in_b = this.compile(a[++k]); }   // fine detune; vmid=0, rails~±100¢
+          else if (a[k] === ":fm")    { o.param_from = this.compile(a[++k]); if (fmDepth === 0) fmDepth = 64; }  // linear FM mod; default depth 64
+          else if (a[k] === ":depth") { fmDepth = this.int(a[++k]) & 0x7F; }
           else if (a[k] === ":phase") {                                    // initial phase, degrees
             const deg = Number(a[++k]);
             o.param = (o.param & 3) | ((Math.round(((deg % 360) + 360) % 360 * 1024 / 360) & 0x3FF) << 2);
           }
         }
+        if (fmDepth > 0) o.param = (o.param & ~(0x7F << 12)) | (fmDepth << 12);
         return this.emit(this.node("phasor", o), "audio");
       }
       // vca = signal×control-gain (mul mode 2), ring = four-quadrant (mode 4), mix = saturating sum.
@@ -1069,22 +1099,32 @@ class Compiler {
         return this.emit(this.node("gate", { in_a: inp, in_b: thr, param: len, param_from: lenFrom }), "pulse");
       }
       case "thru": {
-        // Runtime decode through a lens: value lens = lookup table; op lens = switch applying fn #sel.
-        // Dual of (tape L '(tokens)) encode; same codebook in both directions.
-        const L = a[0];
+        // (thru :lens L :at sel)         -> the entry L[sel mod N] as a value:
+        //                                   value lens returns the looked-up value,
+        //                                   op lens returns the chosen op's position in [0..VMAX].
+        // (thru :lens L :at sel :on x)   -> op lens only: apply L[sel mod N] to x.
+        const lensIx = a.indexOf(":lens"), atIx = a.indexOf(":at"), onIx = a.indexOf(":on");
+        if (lensIx < 0 || atIx < 0)
+          throw new Error("(thru :lens L :at sel [:on x]): :lens and :at are required");
+        const L = a[lensIx + 1];
+        const selSrc = a[atIx + 1];
+        const operand = onIx >= 0 ? a[onIx + 1] : undefined;
         if (!Array.isArray(L) || L[0] !== "lens")
-          throw new Error("(thru L sel [x]): L must be a lens, (def L (lens ...)) or inline (lens ...)");
+          throw new Error("(thru :lens L ...): L must be a lens, (def L (lens ...)) or inline (lens ...)");
         const species = validateLens(L, this.env);
-        const sel = this.compile(a[1]);
+        const sel = this.compile(selSrc);
         if (species === "value") {
-          if (a[2] !== undefined)
-            throw new Error("(thru L sel x): this lens holds VALUES, not ops, drop the operand, or "
+          if (operand !== undefined)
+            throw new Error("(thru :lens L :at sel :on x): this lens holds VALUES, not ops, drop :on, or "
                           + "remove the quote in the lens to reference functions");
           return this.emit(this.node("lookup", { array_idx: this.literalTape(lensValues(L[1][1], this.env)), in_a: sel }));
         }
-        if (a[2] === undefined)
-          throw new Error("(thru L sel x): an op lens needs an operand to apply the chosen op to");
-        return this.dispatch(sel, L.slice(1).map(fn => asTree(expandTree([fn, a[2]], this.env))));
+        if (operand === undefined) {
+          const N = L.length - 1;
+          if (N < 2) return this.compile("0");
+          return this.compile(["mul", ["mod", selSrc, String(N)], String(Math.floor(VMAX / (N - 1)))]);
+        }
+        return this.dispatch(sel, L.slice(1).map(fn => asTree(expandTree([fn, operand], this.env))));
       }
       case "lens":
         throw new Error("a lens is a vocabulary, not a stream: read through it with (thru L sel [x]) "
@@ -1110,6 +1150,26 @@ class Compiler {
       }
       case "rect":   return this.compile(["if", ["gt", a[0], 0], a[0], 0]);
       case "fall":   return this.compile(["edge", ["not", a[0]]]);
+      case "len": {
+        // (len tape): the tape's length as a compile-time constant; lets patches stay
+        // free of magic counts that should track the tape's shape.
+        const i = tapeIdx(a[0]);
+        if (i < 0 || this.tapeLengths[i] === undefined)
+          throw new Error("(len X): X must be a tape (got " + a[0] + ")");
+        return this.compile(String(this.tapeLengths[i]));
+      }
+      case "range": {
+        // (range v :to-index N): v in [0..vmax] -> [0..N-1].
+        // (range v :to-value N): v in [0..N-1]  -> [0..vmax].
+        const k = a.indexOf(":to-index") >= 0 ? ":to-index"
+                : a.indexOf(":to-value") >= 0 ? ":to-value"
+                : null;
+        if (k === null) throw new Error("(range v :to-index N | :to-value N) needs a direction");
+        const N = a[a.indexOf(k) + 1];
+        if (k === ":to-index") return this.compile(["spread", a[0], N]);
+        // mul saturates so we need the divide first; for literal N this folds to a const.
+        return this.compile(["mul", a[0], ["div", String(VMAX), ["sub", N, "1"]]]);
+      }
       case "every":  return this.compile(["eq", ["mod", ["turns"], a[0]], 0]);
       case "euclid": {
         // (euclid P S [:clk c]): live Euclidean gate; P and S accept streams for runtime density control.
@@ -1628,16 +1688,7 @@ function evalSeed(node, env) {
     return valueList(x[1], env);
   }
   if (Array.isArray(x) && x[0] === "euclid") {       // (euclid P S) -> a gate tape
-    let pulses, steps;
-    if (x[1] === ":pulses" || x[1] === ":steps") {   // keyword form (legacy)
-      pulses = 0; steps = 0;
-      for (let k = 1; k < x.length; k++) {
-        if (x[k] === ":pulses") pulses = parseInt(x[++k], 10);
-        else if (x[k] === ":steps") steps = parseInt(x[++k], 10);
-      }
-    } else {                                           // positional form: (euclid P S)
-      pulses = parseInt(x[1], 10); steps = parseInt(x[2], 10);
-    }
+    const pulses = parseInt(x[1], 10), steps = parseInt(x[2], 10);
     if (!(steps > 0)) throw new Error("(euclid P S) needs S > 0");
     return euclid(pulses, steps).map(b => b ? VMAX : 0);
   }

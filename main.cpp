@@ -27,7 +27,7 @@ using namespace loupe;
 
 static constexpr uint32_t kSaveMagic   = 0x4C454E53u;   // 'LENS'
 // Must match SAVE_VERSION in compile.js. Mismatched saves are rejected (no migrations).
-static constexpr uint32_t kSaveVersion = 0x00050005u;
+static constexpr uint32_t kSaveVersion = 0x00050006u;
 // Saved snapshot lives at the end of flash: [u32 length][snapshot] rounded to whole sectors.
 static constexpr size_t   kSavePageBytes = ((4 + LENS_MAX_SNAPSHOT + FLASH_SECTOR_SIZE - 1)
                                             / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
@@ -282,14 +282,16 @@ public:
             return;
         }
         // Save-arming overrides the patch: every LED shows the rising ramp brightness.
-        if (save_ramp_) { LedBrightness(l, (uint16_t)(save_ramp_ << 4)); return; }
+        if (save_ramp_) { LedBrightness(l, save_ramp_); return; }
         int16_t lt = term_.led[l];
         if (lt < 0) { LedOff(l); return; }
         const Node& tf = graph_.nodes[lt];
         int32_t v = graph_state_.nodes[lt].value;
-        uint8_t b = tf.is_signal ? (uint8_t)((v < 0 ? -v : v) >> 3)
-                                 : (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v);
-        LedBrightness(l, (uint16_t)(b << 4));
+        // Signals are bipolar in [-SMAX..SMAX]; doubling the magnitude maps the full
+        // swing onto the 12-bit PWM range. Unipolar values are already 0..VMAX.
+        int32_t bri = tf.is_signal ? ((v < 0 ? -v : v) << 1) : (v < 0 ? 0 : v);
+        if (bri > VMAX) bri = VMAX;
+        LedBrightness(l, (uint16_t)bri);
     }
 
     // Z-switch: MIDDLE = frozen, UP = mutatable. Long DOWN holds to save.
@@ -303,10 +305,10 @@ public:
             if (prev_switch_ != 0) down_t0_us_ = time_us_32();
             uint32_t held = time_us_32() - down_t0_us_;
             // Past the tap window, a sustained DOWN arms a save: LEDs ramp up over ~5 s; full ramp commits.
-            if (held >= kSaveHoldUs)      { save_ramp_ = 255; flash_op_req_ = 1; }
+            if (held >= kSaveHoldUs)      { save_ramp_ = VMAX; flash_op_req_ = 1; }
             else if (held >= kPageTapUs)
             {
-                uint8_t b = (uint8_t)(((uint64_t)(held - kPageTapUs) * 255u) / (kSaveHoldUs - kPageTapUs));
+                uint16_t b = (uint16_t)(((uint64_t)(held - kPageTapUs) * VMAX) / (kSaveHoldUs - kPageTapUs));
                 save_ramp_ = b ? b : 1;
             }
         }
@@ -387,7 +389,7 @@ private:
     RecGate    rec_gate_[kMaxRecordheads] = {};
     int8_t     prev_switch_ = 1;
     uint32_t   down_t0_us_ = 0;
-    uint8_t    save_ramp_ = 0;
+    uint16_t   save_ramp_ = 0;
     // Cross-core flash request: set by save gesture (Core 0) or SysEx (Core 1); SERVICED on Core 0.
     volatile uint8_t flash_op_req_ = 0;
     uint8_t save_page_[kSavePageBytes];          // scratch page for DoFlashOpAndReboot (called once per lifetime)
@@ -576,6 +578,35 @@ private:
             const bool to_core0 = (c0 + cost[k] / 2) < target;
             schedule_.slot[k].core = to_core0 ? 0 : 1;
             if (to_core0) c0 += cost[k];
+        }
+        // Pin recordhead clock sources to Core 0. WriteRecordheads runs on Core 0 every
+        // sample and reads `.phase`/`.wraps` from each recordhead's clock_from directly
+        // (not the shadowed `.value`), so the clock source must not be writing on Core 1
+        // while we read.
+        static int16_t node_to_slot[kNodePool];
+        for (int i = 0; i < kNodePool; ++i) node_to_slot[i] = -1;
+        for (int k = 0; k < n; ++k) node_to_slot[schedule_.slot[k].node] = (int16_t)k;
+        for (int r = 0; r < term_.rec_count; ++r)
+        {
+            const int16_t rt = term_.rec[r];
+            if (rt < 0) continue;
+            const int16_t cf = graph_.nodes[rt].clock_from;
+            if (cf < 0) continue;
+            const int ks = node_to_slot[cf];
+            if (ks >= 0) schedule_.slot[ks].core = 0;
+        }
+        // Co-locate dependent pairs. Ops that read another node's intra-sample
+        // `.phase`/`.level` (declared via CoLocateTarget) must execute on the same core
+        // and AFTER the source in slot order. Slot order is already correct (the source
+        // node has the lower index); only the core needs fixing up.
+        for (int k = 0; k < n; ++k)
+        {
+            const Node& f = schedule_.slot[k].e->nodes[schedule_.slot[k].node];
+            const int16_t src = CoLocateTarget(f);
+            if (src < 0) continue;
+            const int kin = node_to_slot[src];
+            if (kin < 0) continue;                               // src is in the control suffix (rare)
+            schedule_.slot[k].core = schedule_.slot[kin].core;
         }
         RebuildCorePartition(schedule_);
     }

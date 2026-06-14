@@ -1,3 +1,4 @@
 ; the simplest patch: one a4 sine on audio out 1.
+;   patch: audio-out-1 -> Mix or headphones.
 (patch
   (<- audio-out-1 (sine :note A4)))

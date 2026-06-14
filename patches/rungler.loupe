@@ -2,6 +2,8 @@
 ; osc 1 clocks a sample of osc 2 into the tape; the tape re-tunes both oscillators.
 ;   knob-main = feedback depth (clean to chaos)     knob-x = base pitch     knob-y = osc interval
 ;   audio-out-1 = both oscs mixed     cv-out-1 = the rungle voltage
+;   patch: audio-out-1 -> Mix. cv-out-1 -> any modulation input (filter cutoff, osc pitch)
+;          for an extra layer of stepped chaos.
 (patch
   (def depth  knob-main)
   (def rungle (tape '(0 512 1024 1536 2048 2560 3072 3584)))    ; eight cells, seeded with a ramp

@@ -1,8 +1,11 @@
 ; after Eno's Discreet Music, though the similarity mostly stops at the name ;)
 ; two scored melodic lines sent to external oscillators and slopes; their audio returns
-; are summed through a feedback delay. patch cv-out+pulse-out to a voice, return audio-in.
+; are summed through a feedback delay.
 ;   cv-out 1/2 = pitch     pulse-out 1/2 = gate     audio-in 1/2 = voices back
 ;   audio-out 1/2 = dry voice + echo     knob-main = feedback     knob-x = tempo     knob-y = voice 2 drift
+;   patch: cv-out 1/2 -> SineSquare 1/2 v/oct; pulse-out 1/2 -> Slope 1/2 trig;
+;          Slope 1/2 -> audio-in 1/2 (so the voices return for the feedback delay);
+;          audio-out 1/2 -> Mix.
 (patch
   (def feedback knob-main)
   (def tempo    knob-x)

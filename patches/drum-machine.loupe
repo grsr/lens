@@ -1,6 +1,7 @@
 ; two drum kits (straight and latin) A/B'd live by the Z-switch, using the groove DSL.
 ;   knob-main = tempo     knob-x = kick drive (clean..punchy)     knob-y = hat decay (tight..open)
 ;   switch-z  = up = LATIN,  middle/down = STRAIGHT     audio-out 1/2 = kit (mono)
+;   patch: audio-out-1 -> Mix. nothing external needed; drums are internal.
 ;
 ; named rhythms: four-on-floor backbeat eighths offbeat sixteenths downbeat
 ;                tresillo cinquillo habanera son-clave rumba-clave bossa

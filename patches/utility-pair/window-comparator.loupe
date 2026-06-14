@@ -5,4 +5,4 @@
   (def hi (add centre (div width 8) :sat))
   (<- above  (bipolar (gt in hi)))
   (<- within (cv (window in lo hi)))
-  (<- below  (gate (lt in lo) gate))))
+  (<- below  (bipolar (lt in lo)))))

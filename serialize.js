@@ -4,7 +4,7 @@
 const { KIND_ENUM, KNODEPOOL, KMAXGRAPHLITERALS, CONTROL_BYTES } = require('./nodes.js');
 const { computeIntervals, wirePeriod } = require('./intervals.js');
 
-const SAVE_VERSION = 0x00050005;   // must match kSaveVersion in main.cpp and snapshottest.cpp
+const SAVE_VERSION = 0x00050006;   // must match kSaveVersion in main.cpp
 
 function serializeSnapshot(p) {
   const buf = new ArrayBuffer(64 * 1024);

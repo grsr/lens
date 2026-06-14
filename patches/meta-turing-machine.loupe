@@ -1,6 +1,8 @@
 ; like turing-machine.loupe but hunts the transformations applied to a fixed tune, not the notes.
 ;   knob-main = program mutation rate     knob-x = tempo     knob-y = tune mutation rate
 ;   cv-out 1/2 = plain tune / transformed     pulse-out 1/2 = trigger
+;   patch: cv-out 1/2 -> SineSquare 1/2 v/oct; pulse-out 1/2 -> Slope 1/2 trig;
+;          Slope 1/2 -> Mix. audio-out 1/2 carry bench sines as a dry monitor.
 
 ; the four ops; each maps a note to a note
 (def same  (fn (:n) n))
@@ -20,7 +22,7 @@
   (<- tune (if (chance knob-y) (step tune) (snap (add 48 (spread (random) 25)) :scale minor)))
 
   (def v1   (step tune))
-  (def v2   (thru ops (step prog :clk bar) v1))
+  (def v2   (thru :lens ops :at (step prog :clk bar) :on v1))
   (def trig (tick master))
   (<- cv-out-1    (v-oct v1))
   (<- cv-out-2    (v-oct v2))
@@ -28,5 +30,5 @@
   (<- pulse-out-2 trig)
   (<- audio-out-1 (sine v1))                           ; bench monitor
   (<- audio-out-2 (sine v2))                           ; bench monitor
-  (<- led-0       (step prog :clk bar))
+  (<- led-0       (thru :lens ops :at (step prog :clk bar)))
   (<- led-5       (envelope :trig trig :decay 2)))     ; tempo blink

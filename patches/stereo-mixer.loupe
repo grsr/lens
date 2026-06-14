@@ -1,15 +1,16 @@
 ; 2-channel stereo mixer with delay send and paged knobs (three controls per channel on two knobs).
 ;   switch-z  = page: middle = level, up = pan, down = send (holds value when released)
-;   audio-in 1/2 = channels     knob-x/knob-y = ch1/ch2 control     cv-in 1/2 = modulate
+;   audio-in 1/2 = channels     knob-x/knob-y = ch1/ch2 control     cv-bi 1/2 = modulate
 ;   knob-main = master level     audio-out 1/2 = stereo mix
+;   patch: two sources -> audio-in 1/2; audio-out 1/2 -> Mix (stereo).
 (use utility-pair/echo)
 
 ; self-reference `v` is one-sample feedback: tracks ctl while sel, holds otherwise.
 (def paged (fn (:ctl :sel) (feedback v (if sel ctl v))))
 
 (patch
-  (def c1 (add knob-x cv-in-1))
-  (def c2 (add knob-y cv-in-2))
+  (def c1 (add knob-x cv-bi-1 :sat))
+  (def c2 (add knob-y cv-bi-2 :sat))
 
   (def lvl1 (paged c1 (switch-z :middle)))
   (def pan1 (paged c1 (switch-z :up)))

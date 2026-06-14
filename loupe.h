@@ -56,7 +56,11 @@ inline int32_t ReadTapeAt(const Context& ctx, int t, int32_t pos, int32_t offset
 }
 
 // Per-node runtime scratch (parallel to Expression.nodes[]).
-// 12-bit at rest, 32-bit in flight; shadow: write `next`, commit at sample end.
+// `.value` is shadowed (write `.next`, commit at sample end); cross-core reads of
+// `.value` are race-free. Other producer-owned fields (`.phase`, `.level`, `.wraps`)
+// are intra-sample state; ops that read those from another node must declare
+// co-location via NeedsCoLocateWithInA, and recordhead clock sources are pinned to
+// Core 0 in BalancePartition.
 struct NodeState
 {
     int32_t  value;        // committed output read by downstream (PREVIOUS sample)
@@ -71,6 +75,21 @@ struct NodeState
     uint32_t wraps;        // phasor turn count; tick-gated generators self-gate on this
     int32_t  clk_seen;     // monotonic clock this node last acted on (catch up by delta)
 };
+
+// Ops that read another node's intra-sample `.phase`/`.level` MUST share a core with
+// the source, AFTER it in slot order. Returns the source node index, or -1 if none.
+// BalancePartition enforces this every apply so any valid loupe program is dual-core
+// safe regardless of which ops the patch uses.
+inline int16_t CoLocateTarget(const Node& f)
+{
+    switch (f.kind)
+    {
+        case NODE_SHAPE:
+        case NODE_FOLLOW: return f.in_a;       // reads in_a.phase, in_a.level
+        case NODE_TAP:    return f.clock_from; // reads clock_from.phase via WriteHead
+        default:          return -1;
+    }
+}
 
 struct ExprState
 {
@@ -407,14 +426,20 @@ inline int32_t opCounter(ExprState& state, int i, int32_t param, int32_t clk)
     return v;
 }
 
-// edge: rising edge of `a` (threshold VMID/2) -> one-eval VMAX pulse.
+// Width of internal rising-edge pulses (tick, edge): VMAX for this many samples per
+// fire, then 0. Wider than 1 so cross-core consumers reliably see the rise (one-sample
+// commit lag can otherwise miss a single-sample pulse). Still musically instant.
+static constexpr int kTriggerSamples = 3;
+
+// edge: rising edge of `a` -> VMAX for kTriggerSamples, else 0.
 inline int32_t opEdge(ExprState& state, int i, int32_t a)
 {
     NodeState& st = state.nodes[i];
     int32_t high = (a > VMID) ? 1 : 0;
-    int32_t v = (high && st.last_clock == 0) ? VMAX : 0;
+    if (high && st.last_clock == 0) st.pos = kTriggerSamples;
     st.last_clock = (uint8_t)high;
-    return v;
+    if (st.pos > 0) { st.pos--; return VMAX; }
+    return 0;
 }
 
 // diff: x minus its previous evaluated value (slope). First eval yields x (aux0 starts 0).
@@ -610,6 +635,17 @@ inline int32_t opAudioPhasor(const Graph& e, ExprState& s, int idx, const Contex
         int32_t fine = v2sig(s.nodes[f.in_b].value);
         inc += (uint32_t)(int32_t)(((int64_t)(int32_t)inc * fine * 30) >> 20);
     }
+    // :fm linear FM: mod * depth added to inc per sample. Works at any rate; a slow
+    // phasor with FM is a wobbly clock, an audio-rate one is a true FM oscillator.
+    if (f.param_from >= 0)
+    {
+        int32_t depth = (f.param >> 12) & 0x7F;
+        if (depth > 0) {
+            int32_t mod = (e.nodes[f.param_from].is_signal) ? sg(e, s, f.param_from)
+                                                            : v2sig(s.nodes[f.param_from].value);
+            inc = (uint32_t)((int32_t)inc + ((mod * depth) << 5));
+        }
+    }
     // :phase offset in param bits 2..11 (1024 steps/turn); hard sync on clock_from rising edge.
     const uint32_t offs = ((uint32_t)((uint16_t)f.param >> 2) & 0x3FF) << 22;
     if (st.pos == 0) { st.phase = offs; st.pos = 1; }
@@ -686,35 +722,16 @@ inline int32_t opVClock(const Graph& e, ExprState& s, const Context& ctx, int id
     return (int32_t)(st.phase >> 21);
 }
 
-// shape: param 0=sine, 1=tri, 2=saw (DPW), 3=square (DPW). in_a = pitch note or explicit phasor.
-// in_b = FM/PM; array_idx = depth 0..127. clock_from = hard sync.
+// shape: param bit 0-1 = waveform (0 sine, 1 tri, 2 saw, 3 square); bit 2 = :pm enabled.
+// in_a = phasor (compile.js always injects one). in_b = :pm modulator. array_idx = :pm depth.
 inline int32_t opAudioShape(const Graph& e, ExprState& s, int idx, const Context& ctx)
 {
+    (void)ctx;
     const Node& f = e.nodes[idx]; NodeState& st = s.nodes[idx];
-    uint32_t ph; int32_t inc;
-    if (f.in_a >= 0 && e.nodes[f.in_a].kind == NODE_PHASOR)
-    {
-        ph  = s.nodes[f.in_a].phase;                              // explicit phasor: it advanced this sample
-        inc = s.nodes[f.in_a].level;                              // its increment (for DPW invc)
-    }
-    else
-    {
-        if (f.clock_from >= 0 && RisingEdgeOf(e, s, f.clock_from, st.last_clock)) st.phase = 0;
-        int32_t note = (f.in_a >= 0) ? s.nodes[f.in_a].value : -1;
-        uint32_t base = (note >= 0 && ctx.pitch_table) ? ctx.pitch_table[note & 0x7F]
-                                                       : 5852657u;             // ~C2
-        inc = (int32_t)base;
-        if (f.in_b >= 0 && !(f.param & 4))                        // :fm linear FM
-        {
-            int32_t mod = (e.nodes[f.in_b].is_signal) ? sg(e, s, f.in_b)
-                                                          : v2sig(s.nodes[f.in_b].value);
-            int32_t depth = (f.array_idx > 0) ? f.array_idx : 0;
-            inc += (mod * depth) << 5;
-        }
-        if (inc < 0) inc = 0;
-        st.phase += (uint32_t)(inc * ctx.catch_up_steps);
-        ph = st.phase;
-    }
+    // The phasor owns pitch, :hz/:rate/:tempo, :cents, :sync, :fm. The shape just renders.
+    const uint32_t ph_base = (f.in_a >= 0) ? s.nodes[f.in_a].phase : 0u;
+    const int32_t  inc     = (f.in_a >= 0) ? s.nodes[f.in_a].level : 5852657;   // ~C2 idle
+    uint32_t ph = ph_base;
     if ((f.param & 4) && f.in_b >= 0)                             // :pm phase modulation (DX-style)
     {
         int32_t mod = (e.nodes[f.in_b].is_signal) ? sg(e, s, f.in_b)
@@ -1111,8 +1128,10 @@ inline int32_t LENS_AUDIO_HOT(Recompute)(const Graph& e, ExprState& s,
 
         // generative leaves
         case NODE_RANDOM:   return opRandom(e, s, i, clockAdvanced(s.nodes[i], clock_wraps));
-        // chance: re-rolls each tick, holds between.
-        case NODE_CHANCE:   { NodeState& st = s.nodes[i]; if (st.phase == 0) st.phase = RngSeed(i); if (clockAdvanced(st, clock_wraps)) { uint32_t r = XorShift32(st.phase); st.level = ((int32_t)(r >> (32 - VBITS)) < a) ? VMAX : 0; } return st.level; }
+        // chance: re-rolls each tick, holds between. Endpoints are exact:
+        // chance(VMAX) always fires, chance(0) never fires (so a detent at the rail
+        // is a true lock-point, not 4095/4096).
+        case NODE_CHANCE:   { NodeState& st = s.nodes[i]; if (st.phase == 0) st.phase = RngSeed(i); if (clockAdvanced(st, clock_wraps)) { uint32_t r = XorShift32(st.phase); st.level = (a >= VMAX) ? VMAX : (a <= 0) ? 0 : (((int32_t)(r >> (32 - VBITS)) < a) ? VMAX : 0); } return st.level; }
         case NODE_WALK:     return opWalk(e, s, i, clockAdvanced(s.nodes[i], clock_wraps));
         case NODE_GATE:     { int32_t thresh = (f.in_b >= 0) ? rd(s, f.in_b) : VMID; return (a > thresh) ? VMAX : 0; }
 
@@ -1124,7 +1143,8 @@ inline int32_t LENS_AUDIO_HOT(Recompute)(const Graph& e, ExprState& s,
         case NODE_FOLLOW:   return opAudioFollow(e, s, ctx, i);
         case NODE_VCLOCK:   return opVClock(e, s, ctx, i);
         // tick: VMAX on the sample the clock wraps, else 0.
-        case NODE_TICK:     return clockAdvanced(s.nodes[i], clock_wraps) ? VMAX : 0;
+        // tick: VMAX for kTriggerSamples on the clock fire, else 0.
+        case NODE_TICK:     { NodeState& tst = s.nodes[i]; if (clockAdvanced(tst, clock_wraps)) tst.pos = kTriggerSamples; if (tst.pos > 0) { tst.pos--; return VMAX; } return 0; }
         case NODE_SNAP: {
             // snap: nearest note in 12-bit scale mask. Ties prefer lower note.
             int32_t m = (f.param_from >= 0) ? rd(s, f.param_from) : (int32_t)f.param;

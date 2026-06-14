@@ -4,8 +4,8 @@
   (def third  (lens '(4 3 4 5)))          ; maj min dom7 sus4
   (def fifth  (lens '(7 7 7 7)))
   (def fourth (lens '(12 12 10 12)))
-  (<- chord (mix (mix (square root)
-                      (square (transpose root (thru third type))))
-                 (mix (square (transpose root (thru fifth type)))
-                      (square (transpose root (thru fourth type))))))
+  (<- chord (mix (square root)
+                 (square (transpose root (thru :lens third  :at type)))
+                 (square (transpose root (thru :lens fifth  :at type)))
+                 (square (transpose root (thru :lens fourth :at type)))))
   (<- pitch (v-oct root))))
