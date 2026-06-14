@@ -3,8 +3,8 @@
 ; swap either (use ...) for another file from
 ; https://github.com/grsr/lens/tree/main/patches/utility-pair
 ; to try a different utility. not all of them have been tested.
-(use lopass-gate)
-(use wavefolder)
+(use utility-pair/lopass-gate)
+(use utility-pair/wavefolder)
 (patch
   (<- audio-out-1 (lopass-gate audio-in-1 pulse-in-1 knob-x))
   (def wf (wavefolder audio-in-2 (add cv-in-2 knob-y) pulse-in-2 (add 2 (spread knob-main 5))))

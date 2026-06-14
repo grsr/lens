@@ -38,7 +38,7 @@ into the card's outputs.
 ```
 
 You can look at the patches in `patches/` for more shapes. `hello.loupe`,
-`turing.loupe` and `dubdelay.loupe` are good starting points.
+`turing-machine.loupe` and `dubdelay.loupe` are good starting points.
 
 ## The cable
 
@@ -122,7 +122,7 @@ tape.
 
 A tape is a list of 12-bit values. You can author it (`(tape notes '(C3 D3 ...))`),
 generate it from a constant expression, or let a `<-` write into it live: writing
-into a tape from a live stream is how the Turing machine in `patches/turing.loupe`
+into a tape from a live stream is how the Turing machine in `patches/turing-machine.loupe`
 mutates its loop.
 
 A tape doesn't have to be seeded with anything: `(audio :seconds 1.5)`

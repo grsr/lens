@@ -93,8 +93,8 @@ flash so it survives a power cycle.
 
 ```sh
 npm install
-node cli.js write patches/turing.loupe          # send a patch
-node cli.js write patches/turing.loupe --save   # send and save to flash
+node cli.js write patches/turing-machine.loupe          # send a patch
+node cli.js write patches/turing-machine.loupe --save   # send and save to flash
 ```
 
 `node cli.js --help` lists the rest.

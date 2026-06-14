@@ -1,4 +1,4 @@
-; like turing.loupe but hunts the transformations applied to a fixed tune, not the notes.
+; like turing-machine.loupe but hunts the transformations applied to a fixed tune, not the notes.
 ;   knob-main = program mutation rate     knob-x = tempo     knob-y = tune mutation rate
 ;   cv-out 1/2 = plain tune / transformed     pulse-out 1/2 = trigger
 

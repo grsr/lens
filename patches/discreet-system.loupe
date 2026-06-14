@@ -1,3 +1,4 @@
+; after Eno's Discreet Music, though the similarity mostly stops at the name ;)
 ; two scored melodic lines sent to external oscillators and slopes; their audio returns
 ; are summed through a feedback delay. patch cv-out+pulse-out to a voice, return audio-in.
 ;   cv-out 1/2 = pitch     pulse-out 1/2 = gate     audio-in 1/2 = voices back

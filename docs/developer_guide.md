@@ -148,9 +148,9 @@ The compiler and tooling are pure Node:
 
 ```sh
 npm install
-node compile.js patches/turing.loupe         # text to snapshot (binary on stdout)
+node compile.js patches/turing-machine.loupe         # text to snapshot (binary on stdout)
 node tools/bake.js                           # re-bake the factory default
-node cli.js write patches/turing.loupe       # send to a connected card via SysEx
+node cli.js write patches/turing-machine.loupe       # send to a connected card via SysEx
 ```
 
 The verify loop after a change is usually: build the firmware, re-bake the

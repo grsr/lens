@@ -30,7 +30,7 @@ at 48 kHz. See `README.md`.
 
 Read `docs/loupe.md` first; that's the user-facing description of every
 concept they're working with. Then look at the example patches in
-`patches/` for working idioms (`hello.loupe`, `turing.loupe`,
+`patches/` for working idioms (`hello.loupe`, `turing-machine.loupe`,
 `dubdelay.loupe`, the files in `utility-pair/`).
 
 A few things that come up often:
@@ -95,7 +95,7 @@ verify:
 
 ```sh
 cmake --build build --target lens -j      # firmware must build, RAM under 96%
-node compile.js patches/turing.loupe > /dev/null    # compiler smoke test
+node compile.js patches/turing-machine.loupe > /dev/null    # compiler smoke test
 node tools/bake.js                                  # re-bake factory if defaults affected
 node tools/build_web.js                             # web editor self-tests every shipped patch
 ```
