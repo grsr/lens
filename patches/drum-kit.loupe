@@ -1,9 +1,8 @@
-; a 4-voice stereo drum kit (kick / tom / snare / hat) driven by live inputs or a built-in beat.
-;   switch-z middle = LIVE (pulse-in 1/2 = kick/tom, cv-uni 1/2 = snare/hat triggers)
-;   switch-z up     = built-in beat (clocked by pulse-in 1, or internal tempo if unpatched)
+; a 4-voice drum kit (kick / tom / snare / hat) driven by a built-in beat. Same mono
+; sum on both audio outs; patch them through external panners or to L/R for spread.
+;   switch-z up     = beat at clock rate (clocked by pulse-in 1, or internal tempo if unpatched)
 ;   switch-z down   = STUTTER: beat rolls at 4x while held
-;   knob-main = distortion (wavefold over the mix)     audio-out 1/2 = stereo kit
-;   patch: audio-out 1/2 -> Mix (stereo).
+;   knob-main = wavefold distortion     audio-out 1/2 = mixed kit (same on both)
 
 (def tone-drum (fn (:trig :pitch :sweep :decay => :out)
   (def amp  (envelope :trig trig :decay decay))
@@ -22,20 +21,16 @@
   (def hat-beat   (tape '(4095 0 4095 0 4095 0 4095 0)))       ; eighths
   (def tom-beat   (tape '(0 0 0 0 0 0 4095 0)))                ; fill
 
-  (def kick-t  (if (switch-z :middle) pulse-in-1     (onsets kick-beat beatclk)))
-  (def tom-t   (if (switch-z :middle) pulse-in-2     (onsets tom-beat beatclk)))
-  (def snare-t (if (switch-z :middle) (edge cv-uni-1) (onsets snare-beat beatclk)))
-  (def hat-t   (if (switch-z :middle) (edge cv-uni-2) (onsets hat-beat beatclk)))
+  (def kick-t  (onsets kick-beat  beatclk))
+  (def tom-t   (onsets tom-beat   beatclk))
+  (def snare-t (onsets snare-beat beatclk))
+  (def hat-t   (onsets hat-beat   beatclk))
 
   (def kick  (tone-drum  kick-t  24 36 1400))
   (def tom   (tone-drum  tom-t   45 18 700))
   (def snare (noise-drum snare-t 1400 350))
   (def hat   (noise-drum hat-t   3600 90))
 
-  (def kit (stereo-bus (channel kick  :pan 1900)
-                       (channel snare :pan 2300)
-                       (channel tom   :pan 1100)
-                       (channel hat   :pan 3300)))
-  (<- audio-out-1 (wavefold (kit :l) knob-main))
-  (<- audio-out-2 (wavefold (kit :r) knob-main))
+  (<- audio-out-1 (wavefold (mix kick snare tom hat :unity) knob-main))
+  (<- audio-out-2 (wavefold (mix kick snare tom hat :unity) knob-main))
   (<- led-0 (onsets kick-beat beatclk)))
