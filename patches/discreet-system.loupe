@@ -20,7 +20,7 @@
                    Ab4 _ _ ~ ~ ~ ~ ~   F5 Ab5 Bb5 Ab5 _ ~ ~ ~)))
 
   (def delaybuf (audio :seconds 1.7))
-  (def echo (tap delaybuf :amount vmax :span :interp))
+  (def echo (tap delaybuf :amount vmax :span))   ; fixed full-length delay, no glide
 
   (<- cv-out-1    (v-oct (step (t1 :notes) :clk master)))
   (<- pulse-out-1 (gates (t1 :rhythm) master))
@@ -28,10 +28,9 @@
   (<- pulse-out-2 (gates (t2 :rhythm) b2))
 
   (<- delaybuf
-      (lpf :cut 2000)
-      (mix (mix audio-in-1 audio-in-2 :unity)
-           (vca echo feedback)
-           :unity))
+      (lpf :cut 1200)
+      (add (mix audio-in-1 audio-in-2 :unity)
+           (vca echo feedback)))
 
-  (<- audio-out-1 (mix audio-in-1 echo :levels (3 2)))
-  (<- audio-out-2 (mix audio-in-2 echo :levels (3 2))))
+  (<- audio-out-1 (mix audio-in-1 echo :unity))
+  (<- audio-out-2 (mix audio-in-2 echo :unity)))
