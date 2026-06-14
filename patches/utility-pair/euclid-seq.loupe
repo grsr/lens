@@ -1,0 +1,6 @@
+; UTILITY: Euclidean rhythm — 16 steps, live density; trigger, gate and one-per-bar outputs.
+(def euclid-seq (fn (:density => :trig :gate :bar)
+  (def hit (euclid (spread density 17) 16))
+  (<- trig (and hit (tick)))
+  (<- gate (bipolar hit))
+  (<- bar  (eq (mod (turns) 16) 0))))

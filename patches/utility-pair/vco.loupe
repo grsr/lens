@@ -1,0 +1,7 @@
+; UTILITY: VCO — three waveshape families morphing over a timbre input: pulse (varying width),
+; triangle<->saw, and resonant noise<->sine. `shape` crossfades between the families.
+(def vco (fn (:note :timbre :shape => :out)
+  (def pulse  (square note :width (unipolar timbre)))
+  (def trisaw (morph (unipolar timbre) (triangle note) (saw note)))
+  (def resn   (morph (unipolar timbre) (vcf (noise) 900 3600) (sine note)))
+  (<- out (morph shape pulse trisaw resn))))

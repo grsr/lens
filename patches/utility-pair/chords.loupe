@@ -1,0 +1,11 @@
+; UTILITY: chords — a square-wave chord from a root note and a chord-type selector (0..3).
+; The lenses ARE the chord tables: one column of intervals per voice, indexed by `type`.
+(def chords (fn (:root :type => :chord :pitch)
+  (def third  (lens '(4 3 4 5)))          ; maj min dom7 sus4
+  (def fifth  (lens '(7 7 7 7)))
+  (def fourth (lens '(12 12 10 12)))
+  (<- chord (mix (mix (square root)
+                      (square (transpose root (thru third type))))
+                 (mix (square (transpose root (thru fifth type)))
+                      (square (transpose root (thru fourth type))))))
+  (<- pitch (v-oct root))))               ; the root as 1V/oct, to tune other voices

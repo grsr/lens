@@ -1,0 +1,44 @@
+; the meta turing machine: the same idea as turing.loupe, one level up.
+;
+; instead of hunting the notes, it hunts the transformations applied to a fixed tune.
+; a second tape holds a program of ops (same, octave, flip, fifth) and rewrites itself
+; exactly like the turing loop does, so main changes how the tune is varied over time.
+;
+; main = how often the program changes. x = tempo. y = how often the tune itself mutates.
+; out 1 = the plain tune, out 2 = the tune put through the current op.
+
+; the ops: each is a function from a note to a note
+(def same  (fn (:n) n))
+(def oct   (fn (:n) (transpose n 12)))
+(def flip  (fn (:n) (sub 120 n)))
+(def fifth (fn (:n) (transpose n 7)))
+(def ops   (lens same oct flip fifth))        ; a lens turns byte k on a tape into op k
+
+(patch
+  (def master (clock :tempo knob-x))          ; tempo on knob x
+  (def bar    (follow master :div 4))         ; the program changes once every four beats
+  (def tune (tape notes '(C4 E4 G4 B4)))
+  (def prog (tape ops '(same oct flip oct)))  ; the program of ops, on its own tape
+
+  ; rewrite the program tape each bar: the same keep-or-replace move as turing.loupe
+  (<- prog (if (chance knob-main :clk bar) (step prog :clk bar) (random :clk bar)) :clk bar)
+
+  ; and hunt the tune itself each beat: keep the note, or drop in a fresh one (knob y = how often).
+  ; the fresh note is searched over 2 octaves from C3 (= 48), else (random) is 0..VMAX and snap
+  ; clamps it to note 127 -- a near-Nyquist sine that just sounds like noise.
+  (<- tune (if (chance knob-y) (step tune) (snap (add 48 (spread (random) 25)) :scale minor)))
+
+  ; two voices: V1 = the plain tune, V2 = the tune through this bar's op. Each leaves as a
+  ; V/OCT pitch (cv-out) + a GATE (pulse-out) to drive external voices; the audio outs keep a
+  ; bench sine so you can still hear it. Gate = ~50% of each beat (widen/narrow via the 1024).
+  (def v1   (step tune))
+  (def v2   (thru ops (step prog :clk bar) v1))
+  (def trig (tick master))                             ; a trigger on every beat (swap for (lt master 1024) to get ~50% gates)
+  (<- cv-out-1    (v-oct v1))
+  (<- cv-out-2    (v-oct v2))
+  (<- pulse-out-1 trig)
+  (<- pulse-out-2 trig)
+  (<- audio-out-1 (sine v1))                           ; bench monitor
+  (<- audio-out-2 (sine v2))                           ; bench monitor
+  (<- led-0       (step prog :clk bar))
+  (<- led-5       (envelope :trig trig :decay 2)))    ; tempo blink, so the card looks alive on boot

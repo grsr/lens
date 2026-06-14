@@ -1,0 +1,8 @@
+; UTILITY: window comparator — a voltage window of size `width` centred on `centre`; says
+; whether `in` is above / within / below.
+(def window-comparator (fn (:in :centre :width => :above :within :below)
+  (def lo (sub centre (div width 8) :sat))
+  (def hi (add centre (div width 8) :sat))
+  (<- above  (bipolar (gt in hi)))
+  (<- within (cv (window in lo hi)))
+  (<- below  (gate (lt in lo) gate))))

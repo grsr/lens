@@ -1,0 +1,2 @@
+; UTILITY: bitcrusher — sample-rate reduction (crush) then bit-depth reduction (mask top bits).
+(def bitcrusher (fn (:in :rate :depth 3584) (mask (crush in rate) depth)))

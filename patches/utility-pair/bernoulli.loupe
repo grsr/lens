@@ -1,0 +1,5 @@
+; UTILITY: Bernoulli gate — each incoming trig is routed to A with probability `prob`, else to B.
+(def bernoulli (fn (:trig :prob => :a :b)
+  (def coin (chance prob :clk trig))      ; re-flipped on each incoming pulse
+  (<- a (and trig coin))                  ; heads
+  (<- b (and trig (not coin)))))          ; tails

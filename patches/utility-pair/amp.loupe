@@ -1,0 +1,2 @@
+; UTILITY: VCA — the input scaled by a (positive) gain control. One form.
+(def amp (fn (:in :gain) (vca in :amp gain)))

@@ -1,0 +1,40 @@
+; the card sequences two lines and emits pitch and a gate per voice; patch each to an
+; oscillator and a slope, and bring the two voices back into the audio inputs. the card
+; sums them to mono, runs one feedback delay, and sends each dry voice plus the echo out.
+;   cv-out 1/2 = pitch    pulse-out 1/2 = gate
+;   audio-in 1/2 = voices back    audio-out 1/2 = dry voice plus echo
+; main = feedback, x = tempo, y = voice 2 drift.
+(patch
+  (def feedback knob-main)
+  (def tempo    knob-x)                              ; the :tempo map is a slow clock, 0.25 to ~30 hz
+  (def drift    knob-y)                              ; noon locked, past it the voices phase
+  (def master (clock :tempo tempo))
+  (def b2     (follow master :mult 1 :drift drift))
+
+  ; the two lines. _ = hold, ~ = rest; the rests are composed, to keep the echo from crowding.
+  (def t1 (score '(Eb5 _  F5 _ _ ~ ~ ~   C5 Ab4 _ _ ~ ~ ~ ~
+                   Eb4 _ _ _ ~ ~ ~ ~   Ab4 _ _ ~ ~ ~ ~ ~)))
+  (def t2 (score '(Db5 Eb5 _ _ ~ ~ ~ ~   F4 _ _ _ ~ ~ ~ ~
+                   Ab4 _ _ ~ ~ ~ ~ ~   F5 Ab5 Bb5 Ab5 _ ~ ~ ~)))
+
+  (def delaybuf (audio :seconds 1.7))
+  (def echo (tap delaybuf :amount vmax :span :interp))   ; the whole tape behind the head
+
+  ; each voice out: pitch as 1v/oct, gate held for the note's length (gates reads the score's
+  ; rhythm). swap gates for onsets if you want a plucked trigger per note instead.
+  (<- cv-out-1    (v-oct (step (t1 :notes) :clk master)))
+  (<- pulse-out-1 (gates (t1 :rhythm) master))
+  (<- cv-out-2    (v-oct (step (t2 :notes) :clk b2)))
+  (<- pulse-out-2 (gates (t2 :rhythm) b2))
+
+  ; the voices come back in; sum to mono with the echo, filter, and record
+  ; into the delay buffer. :unity normalises so the sum can't exceed range.
+  (<- delaybuf
+      (lpf :cut 2000)
+      (mix (mix audio-in-1 audio-in-2 :unity)
+           (vca echo feedback)
+           :unity))
+
+  ; each dry voice plus the echo behind it -> its audio out (unity weights, no clip)
+  (<- audio-out-1 (mix audio-in-1 echo :levels (3 2)))
+  (<- audio-out-2 (mix audio-in-2 echo :levels (3 2))))

@@ -1,0 +1,21 @@
+build/
+build32/
+*.pass1-broken-backup
+.DS_Store
+.vscode/
+*.swp
+*.bak
+*~
+._*
+
+*.wav
+*.csv
+lens_run
+node_modules/
+
+# the dumping ground: anything here stays local and never ships
+attic/
+lens_run
+lens_sim_events.csv
+*.wav
+lens_raw.txt

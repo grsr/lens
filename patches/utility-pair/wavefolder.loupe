@@ -1,0 +1,8 @@
+; UTILITY (Dec 15): Buchla-style wavefolder, with bonus discrete random voltage + a /2 divider.
+;  - audio out = the folded input; fold `drive` comes from CV in + a knob
+;  - cv out    = a discrete random voltage, a fresh one each `trig`, quantised to `steps` levels (2..6)
+;  - pulse out = every alternate `trig` (toggle is itself the /2 divider)
+(def wavefolder (fn (:in :drive :trig :steps => :out :random :clock)
+  (<- out    (wavefold in drive))
+  (<- random (cv (mul (spread (random :clk trig) steps) (div vmax steps))))
+  (<- clock  (toggle trig))))

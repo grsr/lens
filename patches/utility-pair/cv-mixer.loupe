@@ -1,0 +1,4 @@
+; UTILITY: CV mixer — the sum and the difference of two (already attenuverted) signals.
+(def cv-mixer (fn (:a :b => :sum :diff)
+  (<- sum  (add a b))
+  (<- diff (sub a b))))

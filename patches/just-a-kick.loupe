@@ -1,0 +1,40 @@
+; just a kick drum. the card behaves like a small dedicated kick drum
+; module with knobs, switch and CV control. trigger it from anywhere
+; in your rack.
+;
+; knob-main = decay      (cv-in-2 adds to it)
+; knob-x    = drive      (turn it up to make the kick growl)
+; knob-y    = sweep      (depth of the pitch envelope; the punch of the kick)
+; Z-switch  = octave     (down = C1, middle = C2, up = C3)
+; cv-in-1   = pitch CV   (+-12 semitones around the switched octave)
+; pulse-in-1 or pulse-in-2 fires the kick (either one triggers it)
+;
+; audio-out-1 + audio-out-2 = the kick (mono on both jacks)
+; cv-out-1   = pitch as a v/oct CV (so you can follow the kick's note)
+; cv-out-2   = an INVERSE amp envelope, for sidechaining: high at rest,
+;              ducks down on each kick. patch it into a VCA on whatever
+;              you want to duck under the kick (a bass, a pad, etc).
+; pulse-out-1 = echoes the live trigger (chain other modules off it)
+; pulse-out-2 = a /2 of the trigger (useful for paired voices, claps, etc)
+(patch
+  ; octave from the Z-switch: 24 + 12*pos = C1 / C2 / C3 (down / middle / up)
+  (def octave-base (add 24 (mul (switch-pos) 12)))
+  (def pitch       (add octave-base (spread cv-in-1 12)))
+  (def decay       (add knob-main cv-in-2))
+  (def drive       knob-x)
+  (def sweep       knob-y)
+  (def trig        (or pulse-in-1 pulse-in-2))
+
+  (def voice (kick :midi pitch :decay decay :drive drive :sweep sweep :trig trig))
+
+  ; the kick's amp envelope, mirrored as a separate envelope, then inverted:
+  ; sit at vmax when nothing is firing, dip to 0 on each kick, recover.
+  (def amp     (envelope :trig trig :decay decay))
+  (def ducker  (sub vmax amp))
+
+  (<- audio-out-1 voice)
+  (<- audio-out-2 voice)
+  (<- cv-out-1    (v-oct pitch))
+  (<- cv-out-2    ducker)
+  (<- pulse-out-1 trig)
+  (<- pulse-out-2 (toggle trig)))

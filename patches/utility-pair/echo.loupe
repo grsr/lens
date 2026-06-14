@@ -1,0 +1,6 @@
+; UTILITY: delay — up to ~0.7 s with internal feedback (down to Karplus-Strong at short times).
+; `time` is a 12-bit control mapped over the whole tape (:span); `fb` = feedback.
+(def echo (fn (:in :time :fb => :out)
+  (def buf (audio :seconds 0.7))
+  (<- buf (add in (vca (tap buf :amount time :span :interp) :amp fb)))
+  (<- out (mix in (tap buf :amount time :span :interp)))))

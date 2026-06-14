@@ -1,0 +1,3 @@
+; UTILITY: attenuverter — gain through zero (centre = off, right = +, left = invert), with a mute.
+(def attenuverter (fn (:in :amount :gate vmax)
+  (vca (mul in amount :bipolar) :amp gate)))

@@ -1,0 +1,13 @@
+{
+  "name": "lens-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lens patch transfer over USB MIDI SysEx (compile .loupe -> blob -> WRITE_STATE)",
+  "bin": { "lens": "cli.js" },
+  "scripts": {
+    "bake": "node tools/bake.js"
+  },
+  "dependencies": {
+    "@julusian/midi": "^3.1.2"
+  }
+}

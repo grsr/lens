@@ -1,0 +1,14 @@
+; THE POINT OF THE CARD: every utility here is a standalone library FUNCTION. A pair patch `use`s
+; two and wires each to one half of the faceplate — left (audio/cv/pulse-in 1, knob-x, led-0) and
+; right (jacks 2, knob-y, led-3). Any two combine; the functions are a library any patch can draw
+; on. Here: a lopass gate on the left, the Buchla wavefolder (+ its bonus outputs) on the right.
+(use lopass-gate)
+(use wavefolder)
+(patch
+  (<- audio-out-1 (lopass-gate audio-in-1 pulse-in-1 knob-x))     ; left: ping it with pulse-in-1
+  (def wf (wavefolder audio-in-2 (add cv-in-2 knob-y) pulse-in-2 (add 2 (spread knob-main 5))))
+  (<- audio-out-2 (wf :out))                                      ; right: the fold
+  (<- cv-out-2    (wf :random))                                   ;        + discrete random voltage
+  (<- pulse-out-2 (wf :clock))                                    ;        + /2 of pulse-in-2
+  (<- led-0 knob-x)
+  (<- led-3 knob-y))

@@ -1,0 +1,4 @@
+# Loupe patches are S-expressions: tell GitHub (and tooling) to highlight them as
+# Lisp. Editors get it from the modeline at the top of each .loupe file
+# (; -*- mode: scheme -*- vim: ft=lisp).
+*.loupe linguist-language=Scheme

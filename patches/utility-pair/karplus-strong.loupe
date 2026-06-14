@@ -1,0 +1,10 @@
+; UTILITY: Karplus-Strong — two delay lines coupled by a rotation matrix, so energy leaks
+; between them and the partials go inharmonic. `coupling` = angle (0 = two plain strings).
+;   a' = c*a - s*b      b' = s*a + c*b      (each damped by the one-pole in its loop)
+(def karplus-strong (fn (:in :coupling => :out)
+  (def a (audio :length 220))             ; ~218 Hz string
+  (def b (audio :length 233))             ; a detuned sibling
+  (def s coupling) (def c (invert s))
+  (<- a (mix in (sub (vca (average (tap a) 200) :amp c) (vca (average (tap b) 200) :amp s))))
+  (<- b (mix in (add (vca (average (tap a) 200) :amp s) (vca (average (tap b) 200) :amp c))))
+  (<- out (mix (average (tap a) 200) (average (tap b) 200)))))

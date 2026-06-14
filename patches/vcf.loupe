@@ -1,0 +1,4 @@
+; a saw through the filter. main = cutoff, x = resonance. out 2 is the dry saw for comparison.
+(patch
+  (<- audio-out-1 (vcf :cut knob-main :res knob-x) (saw 33))
+  (<- audio-out-2 (saw 33)))

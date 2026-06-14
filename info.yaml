@@ -1,0 +1,5 @@
+Description: A programmable synth. Write patches in Loupe (a tiny Lisp); sequences of values read through lenses become pitch, rhythm, CV and audio.
+Language: C++ (ComputerCard)
+Creator: Graham Ritchie
+Version: 0.1
+Status: WIP

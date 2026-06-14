@@ -1,0 +1,14 @@
+; a sidechain compressor / ducker. audio-in-1 is the main signal; audio-in-2 is the sidechain
+; KEY (patch a kick there for classic pumping; unpatched it keys off the main input, i.e. an
+; ordinary compressor). The key's level above a threshold pulls the main's gain down.
+;   main = threshold   x = depth (how hard it ducks)   y = release (envelope smoothing)
+;   audio-out 1 = the ducked main   audio-out 2 = ducked main + key (the pump, in context)
+(patch
+  (def sc    (normal audio-in-2 audio-in-1))                     ; the sidechain key signal
+  (def env   (envfollow sc knob-y))                              ; its envelope (release = knob-y)
+  (def over  (sub env knob-main :sat))                           ; how far the key is over the threshold (0 below)
+  (def gain  (sub vmax (vca over knob-x) :sat))                  ; reduce the main's gain in proportion
+  (def duck  (vca audio-in-1 gain))                              ; the ducked main
+  (<- audio-out-1 duck)
+  (<- audio-out-2 (mix duck sc))                                 ; ducked main summed with the key
+  (<- led-0 over))                                               ; a gain-reduction meter

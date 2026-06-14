@@ -1,0 +1,22 @@
+; a rungler: two oscillators that modulate each other through a tape. osc 1 clocks a write
+; of osc 2's level into a short tape, and that tape read back is a stepped voltage that
+; re-tunes both oscillators. the loop feeds itself, so it wanders between order and chaos.
+; the tape here is not a melody, it is the feedback memory (after rob hordijk's benjolin).
+; main = feedback depth, from clean up to chaos. x = base pitch. y = the interval between
+; the two oscillators.
+(patch
+  (def depth  knob-main)
+  (def rungle (tape '(0 512 1024 1536 2048 2560 3072 3584)))    ; eight cells, seeded with a ramp
+
+  ; read the current cell as a bipolar modulation, scaled by the depth knob
+  (def mod  (mul (bipolar (step rungle)) depth :bipolar))
+  (def base (spread knob-x 60))                                ; x shifts both oscillators
+  (def o1   (phasor (add base (spread mod 24))))
+  (def o2   (phasor (add (add base (spread knob-y 24)) (spread mod 48))))  ; y sets the interval
+
+  ; rewrite the tape: sample osc 2 into it, clocked by osc 1's cycle. this is the feedback.
+  (<- rungle (unipolar (saw o2)) :clk o1)
+
+  (<- audio-out-1 (mix (saw o1) (saw o2)))
+  (<- cv-out-1    (cv (step rungle)))                          ; the rungle, as a modulation output
+  (<- led-0       (step rungle)))

@@ -1,0 +1,7 @@
+; UTILITY: Slopes+ — Serge loop logic: a gate ON at the floor, OFF past a (CV-set) ceiling,
+; with fresh random voltages on each edge. `amount` scales the rising-edge random.
+(def slopes-plus (fn (:in :ceiling :amount => :gate :rise :fall)
+  (def flip (schmitt in 64 ceiling))
+  (<- gate (not flip))
+  (<- rise (vca (random :clk flip) :amp amount))
+  (<- fall (random :clk (fall flip)))))

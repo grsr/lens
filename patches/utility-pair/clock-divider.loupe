@@ -1,0 +1,5 @@
+; UTILITY: clock divider — /2 /4 /8 of an incoming clock, gate and trigger flavours.
+(def clock-divider (fn (:clk => :div2 :div4 :div8)
+  (<- div2 (bipolar (toggle (tick (follow clk :div 2)))))
+  (<- div4 (toggle (tick (follow clk :div 4))))
+  (<- div8 (tick (follow clk :div 8)))))

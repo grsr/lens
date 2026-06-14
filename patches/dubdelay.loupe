@@ -1,0 +1,9 @@
+; a dub delay: a resonant low-pass sits inside the loop, so closing the cutoff darkens
+; the echoes as they recirculate. main = delay time, x = cutoff, y = feedback.
+(patch
+  (def buf (audio :seconds 1.5))                                    ; the delay buffer
+  (<- buf
+      (vcf :cut knob-x :res 1500)                                 ; filter the loop sum
+      (add audio-in-1 (vca (tap buf :amount knob-main :span :interp) knob-y)))
+  (<- audio-out-1 (add audio-in-1 (tap buf :amount knob-main :span :interp)))
+  (<- audio-out-2 audio-in-1))
