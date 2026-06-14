@@ -15,18 +15,12 @@ const readSrc = (f) => fs.readFileSync(path.join(ROOT, f), "utf8")
 // Compiler modules bundled as browser-compatible CommonJS; fs/path are stubbed in the shim.
 const MODULES = ["reader.js", "nodes.js", "intervals.js", "serialize.js", "compile.js", "sysex.js"];
 
-// Example patches embedded in the page (shown in picker order).
-const EXAMPLE_FILES = [
-  "patches/hello.loupe",
-  "patches/just-a-kick.loupe",
-  "patches/vcf.loupe",
-  "patches/turing.loupe",
-  "patches/meta-turing-machine.loupe",
-  "patches/rungler.loupe",
-  "patches/dubdelay.loupe",
-  "patches/discreet-system.loupe",
-  "patches/utility-pair/pair.loupe",
-];
+// Example patches embedded in the page: every top-level .loupe in patches/.
+// (Library files live in patches/utility-pair/ and are not included here.)
+const EXAMPLE_FILES = fs.readdirSync(path.join(ROOT, "patches"))
+  .filter(f => f.endsWith(".loupe"))
+  .sort()
+  .map(f => "patches/" + f);
 
 const shim = `
 const __mods = {}, __cache = {};
@@ -129,7 +123,7 @@ const html = `<!doctype html>
   <pre id="hl" aria-hidden="true"></pre>
   <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off">${starter.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</textarea>
 </main>
-<footer>edits compile as you type · send = play it now · save to card = survives power-off · Chrome/Edge only (WebMIDI)</footer>
+<footer>edits compile as you type · send = play it now · save to card = survives power-off · Chrome/Edge only (WebMIDI) · <a href="https://github.com/grsr/lens/blob/main/docs/loupe.md" target="_blank">loupe docs</a> · <a href="https://github.com/grsr/lens" target="_blank">repo</a></footer>
 <script>
   // Surface any error to the status bar.
   window.addEventListener("error", function (e) {
