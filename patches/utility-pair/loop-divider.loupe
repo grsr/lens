@@ -1,9 +1,9 @@
-; UTILITY: loop divider — keeps ~1.6 s of rolling history, plays divisions back re-pitched and
-; re-ordered (direction flips each bar). `pitch` re-pitches the slots.
+; UTILITY: loop divider — keeps ~1.6 s of rolling history, plays back in re-ordered divisions
+; (direction flips each bar). `pitch` re-pitches the playback slots.
 (def loop-divider (fn (:in :pitch => :out :beat)
   (def buf (audio :seconds 1.6))
   (<- buf in)
-  (def order (tape '(0 2 1 3 0 2 3 1)))   ; the division order — huntable
+  (def order (tape '(0 2 1 3 0 2 3 1)))   ; huntable
   (def pick  (step order))
   (<- out (if (toggle (tick (follow master :div 8)))
               (wave buf pitch :slots 4 :pick pick :reverse)

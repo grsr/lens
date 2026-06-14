@@ -1,5 +1,4 @@
 ; UTILITY: lopass gate — Buchla-style, one control opens amplitude and brightness together.
-; `ping` strikes it (a trigger), `decay` sets the pluck length. The gate closes between pings,
-; so it is silent at rest (for a sustained drone, open the lpg with a held CV instead).
+; `ping` = trigger, `decay` = pluck length. silent at rest; use a held CV for a sustained drone.
 (def lopass-gate (fn (:in :ping :decay)
   (lpg in (envelope :trig ping :decay decay))))

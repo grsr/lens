@@ -1,22 +1,16 @@
-; drum-machine.loupe
-; The more advanced patch: TWO full kits written with the `groove` DSL and the built-in NAMED
-; RHYTHMS (the rhythmic sibling of the named scales), A/B'd live by the Z-switch. Built on the
-; kick / snare / hat synth voices. See drum-primitives.loupe for the voices and rhythm forms alone.
-;
+; two drum kits (straight and latin) A/B'd live by the Z-switch, using the groove DSL.
 ;   knob-main = tempo     knob-x = kick drive (clean..punchy)     knob-y = hat decay (tight..open)
-;   switch-z  = the FEEL:  up = LATIN,  middle/down = STRAIGHT  (both kits share the clock, locked)
-;   audio-out 1 / 2 = the kit (mono)      led-0 = the downbeat
+;   switch-z  = up = LATIN,  middle/down = STRAIGHT     audio-out 1/2 = kit (mono)
 ;
-; THE NAMED RHYTHMS (x = hit, . = rest):
-;   four-on-floor backbeat eighths offbeat sixteenths downbeat
-;   tresillo cinquillo habanera son-clave rumba-clave bossa
-; or roll your own:  a step-string (beat x..x..x.) , or (euclid pulses steps).
+; named rhythms: four-on-floor backbeat eighths offbeat sixteenths downbeat
+;                tresillo cinquillo habanera son-clave rumba-clave bossa
+; or roll your own: (beat x..x..x.) or (euclid pulses steps)
 
 (patch
   (def tempo (knob :main :default 2600))
-  (def punch (knob :x :default 2800))                 ; kick drive default nudged up (more punch)
-  (def open  (knob :y :default 1300))                 ; hat decay default a bit longer
-  (def clk   (clock :tempo tempo))                   ; one clock, shared by both kits so they lock
+  (def punch (knob :x :default 2800))
+  (def open  (knob :y :default 1300))
+  (def clk   (clock :tempo tempo))
 
   ; a straight backbeat kit
   (def straight
@@ -25,14 +19,13 @@
       (snare :on backbeat      :note C3 :snappy 3600 :tone 2800  :decay 1350)
       (hat   :on eighths       :note A5 :tone 3200   :decay open)))
 
-  ; a latin kit: son-clave kick, tresillo snare, euclidean hats
+  ; a latin kit
   (def latin
     (groove :clk clk
       (kick  :on son-clave      :note A1 :drive punch :sweep 3500 :decay 1800)
       (snare :on tresillo       :note C3 :snappy 2200 :tone 2600  :decay 1250)
       (hat   :on (euclid 11 16) :note A5 :tone 3400   :decay open)))
 
-  ; the Z-switch A/Bs the feel (selecting between two audio mixes)
   (def kit (if (switch-z :up) latin straight))
   (<- audio-out-1 kit)
   (<- audio-out-2 kit)

@@ -1,29 +1,16 @@
-; the turing machine: a loop of notes that slowly rewrites itself.
-;
-; the loop lives on a tape. a clock steps through it, and each step is either kept or
-; replaced with a fresh random note; the result is written back onto the same tape.
-; reading and writing the one tape is what makes a loop that evolves.
-;
-; main = how often a step is replaced. fully clockwise keeps every step, so the loop
-; locks and repeats; fully anticlockwise replaces every step, so it is pure random.
-; x = tempo.
+; a loop of notes that slowly rewrites itself; main controls mutation rate.
+;   knob-main = mutation (CW = locked loop, CCW = pure random)     knob-x = tempo
+;   cv-out-1 = pitch     pulse-out-1 = clock trigger
 (patch
-  ; master is the clock the time forms follow when you don't name one. we put it on knob x.
   (def master (clock :tempo knob-x))
-
-  ; the loop is the machine's memory: eight notes to start with, written on a tape.
   (def loop (tape notes '(C3 Eb3 G3 Bb3 C4 Bb3 G3 Eb3)))
 
-  ; each beat: keep the step we read, or drop in a new note snapped to the scale.
-  ; chance is true with a probability set by the knob; <- writes the result back onto the tape.
-  ; a fresh note is searched over a 2-OCTAVE window from C3 (spread maps random 0..VMAX into
-  ; 0..24 semitones), then snapped to the minor scale. Without the window, (random) is 0..VMAX
-  ; and snap clamps to note 127, so every replacement pins to the top and the loop degenerates.
+  ; keep the current step, or replace with a random note in a 2-octave window from C3.
+  ; the window keeps replacements musical; without it snap would clamp to note 127.
   (<- loop (if (chance knob-main)
                (step loop)
                (snap (add 48 (spread (random) 25)) :scale minor)))   ; 48 = C3, +0..24 semis = 2 oct
 
-  ; the loop leaves as pitch, the clock as a trigger, and the loop also drives an led.
   (<- cv-out-1    (v-oct (step loop)))
   (<- pulse-out-1 (tick))
   (<- led-0       (step loop)))

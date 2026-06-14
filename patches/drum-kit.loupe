@@ -1,32 +1,26 @@
-; a little 4-voice drum kit, struck by the pulse and CV inputs and spread across the stereo bus.
-; the voices are synthesised the loupe way: an envelope shapes a body (a pitch-swept sine for the
-; membrane drums, a band of noise for the snare/hat). the Z-switch chooses how it plays:
-;   middle = LIVE: pulse-in 1/2 fire kick/tom, cv-in 1/2 fire snare/hat
-;   up     = the built-in BEAT plays, clocked by pulse-in 1 (or the internal tempo if unpatched)
-;   down   = STUTTER: the beat rolls at 4x while you hold the switch down (momentary)
-;   knob-main = distortion (wavefold) over the whole mix     audio-out 1/2 = the stereo kit
+; a 4-voice stereo drum kit (kick / tom / snare / hat) driven by live inputs or a built-in beat.
+;   switch-z middle = LIVE (pulse-in 1/2 = kick/tom, cv-in 1/2 = snare/hat)
+;   switch-z up     = built-in beat (clocked by pulse-in 1, or internal tempo if unpatched)
+;   switch-z down   = STUTTER: beat rolls at 4x while held
+;   knob-main = distortion (wavefold over the mix)     audio-out 1/2 = stereo kit
 
-; a membrane drum: a sine whose pitch sweeps down over `sweep` semitones, amplitude decaying.
 (def tone-drum (fn (:trig :pitch :sweep :decay => :out)
   (def amp  (envelope :trig trig :decay decay))
-  (def bend (spread (envelope :trig trig :decay (div decay 3)) sweep))   ; a faster pitch envelope
+  (def bend (spread (envelope :trig trig :decay (div decay 3)) sweep))   ; pitch envelope is 3x faster
   (<- out (vca (sine (add pitch bend)) amp))))
 
-; a noise drum: a band of noise (cut = centre) with a fast decay -- snare low, hat high.
 (def noise-drum (fn (:trig :cut :decay => :out)
   (<- out (vca (bpf (noise) cut) (envelope :trig trig :decay decay)))))
 
 (patch
-  (def clk     (normal pulse-in-1 master))                     ; beat clock (internal tempo if unpatched)
-  (def beatclk (if (switch-z :down) (follow clk :mult 4) clk)) ; down = 4x roll, else the clock
+  (def clk     (normal pulse-in-1 master))
+  (def beatclk (if (switch-z :down) (follow clk :mult 4) clk))
 
-  ; the built-in beat patterns (a hit = 4095), read as onsets at the beat clock
   (def kick-beat  (tape '(4095 0 0 0 4095 0 0 0)))             ; four-on-the-floor
   (def snare-beat (tape '(0 0 4095 0 0 0 4095 0)))             ; backbeat
   (def hat-beat   (tape '(4095 0 4095 0 4095 0 4095 0)))       ; eighths
-  (def tom-beat   (tape '(0 0 0 0 0 0 4095 0)))                ; a fill
+  (def tom-beat   (tape '(0 0 0 0 0 0 4095 0)))                ; fill
 
-  ; middle = the live input; up/down = the built-in beat (down rolls it at 4x)
   (def kick-t  (if (switch-z :middle) pulse-in-1     (onsets kick-beat beatclk)))
   (def tom-t   (if (switch-z :middle) pulse-in-2     (onsets tom-beat beatclk)))
   (def snare-t (if (switch-z :middle) (edge cv-in-1) (onsets snare-beat beatclk)))
@@ -37,10 +31,10 @@
   (def snare (noise-drum snare-t 1400 350))
   (def hat   (noise-drum hat-t   3600 90))
 
-  (def kit (stereo-bus (channel kick  :pan 1900)               ; spread the kit across the field
+  (def kit (stereo-bus (channel kick  :pan 1900)
                        (channel snare :pan 2300)
                        (channel tom   :pan 1100)
                        (channel hat   :pan 3300)))
-  (<- audio-out-1 (wavefold (kit :l) knob-main))               ; knob-main = distortion over the mix
+  (<- audio-out-1 (wavefold (kit :l) knob-main))
   (<- audio-out-2 (wavefold (kit :r) knob-main))
   (<- led-0 (onsets kick-beat beatclk)))

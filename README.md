@@ -17,6 +17,11 @@ quantiser, a delay, a Turing machine, whatever you wire up. You write patches
 in [Loupe](docs/loupe.md), a small parens-and-S-expressions language that
 compiles to a graph the card runs at 48 kHz.
 
+If you already have a card flashed with Lens, the web editor lives at
+<https://grsr.github.io/lens/web/> (Chrome or Edge, WebMIDI needed). It
+loads the example patches, lets you edit and send them to the card, and
+saves them into flash.
+
 Out of the box the card boots into `meta-turing-machine.loupe`. It's a take
 on Tom Whitwell's Turing Machine with an extra layer: there's the usual tape of notes that slowly rewrites itself,
 plus a second tape holding a stream of operations (transpose, octave, flip,
@@ -79,13 +84,10 @@ currently running into the card's flash, so it survives a power cycle.
 
 There are two ways to send a different patch to the card.
 
-**Web editor (no install).** Open `web/index.html` in Chrome or Edge (WebMIDI
-is needed), click *connect*, pick an example from the dropdown, edit, hit
-*send*. *Save to card* writes the patch into flash so it survives a power
-cycle. Once the project is hosted on GitHub Pages there will be a URL; for
-now you can serve the repo locally with any static file server, for example
-`python3 -m http.server` from the repo root and then open
-`http://localhost:8000/web/`.
+**Web editor (no install).** Open <https://grsr.github.io/lens/web/> in
+Chrome or Edge (WebMIDI is needed), click *connect*, pick an example from
+the dropdown, edit, hit *send*. *Save to card* writes the patch into
+flash so it survives a power cycle.
 
 **Command line.** If you have Node:
 

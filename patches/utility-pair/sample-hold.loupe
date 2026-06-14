@@ -1,5 +1,4 @@
-; UTILITY: sample & hold — sample `in` on each `trig`, with a slew-limited copy and an
-; "arrived" trigger when the slew reaches the target.
+; UTILITY: sample & hold — sample `in` on each `trig`, with slew copy and arrived trigger.
 (def sample-hold (fn (:in :trig :rate => :held :glided :arrived)
   (def h (hold in trig))
   (def g (slew h :rate rate))

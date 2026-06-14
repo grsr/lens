@@ -1,5 +1,4 @@
-; UTILITY: chorus/flanger — a swept fractional tap behind a recording head. `speed` = sweep
-; rate, `depth` = base delay (toward flanger when small).
+; UTILITY: chorus/flanger — swept fractional tap. `speed` = sweep rate, `depth` = base delay (small = flanger).
 (def chorus (fn (:in :speed :depth => :out)
   (def buf (audio :seconds 0.05))
   (<- buf in)

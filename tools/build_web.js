@@ -25,6 +25,7 @@ const EXAMPLE_FILES = [
   "patches/rungler.loupe",
   "patches/dubdelay.loupe",
   "patches/discreet-system.loupe",
+  "patches/utility-pair/pair.loupe",
 ];
 
 const shim = `
@@ -61,8 +62,15 @@ const examplesJs = "const EXAMPLES = " + JSON.stringify(examples) + ";\n";
   vm.createContext(sandbox);
   vm.runInContext(lib + "globalThis.__Lens = Lens;", sandbox);
   const L = sandbox.__Lens;
+  // Host-side loader so (use) resolves through real fs (the sandboxed compiler has no require).
+  const useLoader = (baseDir, file) => {
+    let full = path.resolve(baseDir, file);
+    if (!fs.existsSync(full) && fs.existsSync(full + ".loupe")) full += ".loupe";
+    if (!fs.existsSync(full)) return null;
+    return { text: fs.readFileSync(full, "utf8"), baseDir: path.dirname(full) };
+  };
   for (const f of EXAMPLE_FILES) {
-    const snap = L.serializeSnapshot(L.compilePatch(L.loadPatch(readSrc(f), path.dirname(path.join(ROOT, f)))));
+    const snap = L.serializeSnapshot(L.compilePatch(L.loadPatch(readSrc(f), path.dirname(path.join(ROOT, f)), useLoader)));
     console.log("self-test: " + f + " -> " + snap.length + " B snapshot");
   }
 }

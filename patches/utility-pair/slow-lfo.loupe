@@ -1,5 +1,4 @@
-; UTILITY: slow LFO — a pair of very slow sines that drift in and out of phase; `rephase` is
-; the phasing rate (follow :drift).
+; UTILITY: slow LFO — two slow sines drifting in and out of phase; `rephase` sets the drift rate.
 (def slow-lfo (fn (:rephase => :a :b)
   (def base (clock :hz 0.05))             ; ~20 s cycle
   (<- a (sine base))

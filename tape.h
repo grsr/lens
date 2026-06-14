@@ -1,4 +1,4 @@
-// tape.h: Loupe's memory: one byte buffer, carved into Tape handles.
+// tape.h: Loupe's memory: one 12-bit value buffer, carved into Tape handles.
 
 #pragma once
 
