@@ -2,5 +2,5 @@
 ;   :out = folded input     :random = fresh random voltage per trig, quantised to `steps` levels (2..6)     :clock = /2
 (def wavefolder (fn (:in :drive :trig :steps => :out :random :clock)
   (<- out    (wavefold in drive))
-  (<- random (cv (mul (spread (random :clk trig) steps) (div vmax steps))))
+  (<- random (cv (mul (spread (random :trig trig) steps) (div VMAX steps))))
   (<- clock  (toggle trig))))

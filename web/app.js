@@ -1,10 +1,7 @@
-// web/app.js — the Lens patch loader: pick or edit a Loupe patch, ship it to the card
-// over WebMIDI SysEx. BROWSER code, inlined by tools/build_web.js after the bundled
-// compiler (global `Lens`) and the embedded example patches (global `EXAMPLES`).
-// Deliberately minimal: an editor, a picker, connect / send / save. The text is the patch.
-//
-// Note: top-level names avoid the legacy window globals (status, name, length, ...);
-// a classic <script> that declares `const status` is rejected whole by some browsers.
+// web/app.js — Lens patch loader UI.
+// Inlined by tools/build_web.js after the bundled compiler (global `Lens`)
+// and embedded example patches (global `EXAMPLES`).
+// Requires a secure context for WebMIDI (https or localhost).
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -17,14 +14,9 @@ let snapshot = null;        // last good compile's bytes
 
 const say = (msg, cls) => { statusEl.textContent = msg; statusEl.className = cls || ""; };
 
-// Surface any uncaught error to the status bar rather than dying silently.
 window.addEventListener("error", (e) => say(e.message, "err"));
 
-// ---- syntax highlighting -------------------------------------------------------------
-// A transparent textarea over a coloured <pre>, kept in sync on input and scroll. No
-// editor library: Loupe is a tiny lisp, one regex pass covers it (comments, :keywords,
-// numbers, form heads, parens by depth). Highlighting is cosmetic, so it never throws
-// up the stack: a failure just leaves the previous paint in place.
+// ---- syntax highlighting -------------------------------------------------------
 const TOKEN = /(;[^\n]*)|(:[\w?*+-]+)|(\(|\))|(-?\d[\w.]*)|([^\s();]+)|(\s+)/g;
 const escHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
@@ -43,66 +35,66 @@ function highlight(src) {
     else if (sym) { out += head ? '<span class="head">' + escHtml(sym) + "</span>" : escHtml(sym); head = false; }
     else out += ws;
   }
-  return out + "\n";    // trailing newline keeps the pre and textarea the same height
+  return out + "\n";
 }
 
 function paint() { try { hl.innerHTML = highlight(editor.value); } catch (_) {} }
 const syncScroll = () => { hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft; };
 
-// (use FILE) loader: same-origin fetch from patches/. Pre-fetches every reference
-// (recursive) before compile, so spliceUses can stay synchronous.
-const useCache = new Map();    // URL -> text
+// (use FILE) loader: fetch patches by URL, cache recursively before compile.
+const useCache = new Map();
 const scanUses = (t) => { const re = /\(\s*use\s+([^\s)]+)/g, out = []; let m; while ((m = re.exec(t))) out.push(m[1]); return out; };
-const dirOf = (url) => { const i = url.lastIndexOf("/"); return i < 0 ? "" : url.slice(0, i); };
 
-async function pullUses(baseDir, file) {
-  for (const cand of [file, file + ".loupe"]) {
-    const url = new URL(baseDir + "/" + cand, location.href).href;
-    if (useCache.has(url)) return;
+async function pullUses(relpath) {
+  for (const cand of [relpath, relpath + ".loupe"]) {
+    const url = new URL("../" + cand, location.href).href;
+    if (useCache.has(cand)) return;
     try {
       const r = await fetch(url);
       if (!r.ok) continue;
       const t = await r.text();
-      useCache.set(url, t);
-      for (const u of scanUses(t)) await pullUses(dirOf(url), u);
+      useCache.set(cand, t);
+      for (const u of scanUses(t)) await pullUses("patches/" + u);
       return;
     } catch (_) {}
   }
 }
 
-const useLoader = (baseDir, file) => {
-  for (const cand of [file, file + ".loupe"]) {
-    const url = new URL(baseDir + "/" + cand, location.href).href;
-    if (useCache.has(url)) return { text: useCache.get(url), baseDir: dirOf(url) };
-  }
+// loadFile(relpath): returns text string or null. relpath is repo-root-relative.
+const loadFile = (relpath) => {
+  if (useCache.has(relpath)) return useCache.get(relpath);
   return null;
 };
 
 async function refresh() {
   try {
     const text = editor.value;
-    for (const u of scanUses(text)) await pullUses("../patches", u);
-    const compiled = Lens.compilePatch(Lens.loadPatch(text, "../patches", useLoader));
-    snapshot = Lens.serializeSnapshot(compiled);
-    say(compiled.graph.nodes.length + " nodes · " + snapshot.length + " B"
+    for (const u of scanUses(text)) await pullUses("patches/" + u);
+    const ast        = Lens.read(text);
+    const expanded   = Lens.expand(ast, { loadFile });
+    const lowered    = Lens.lower(expanded);
+    const scheduled  = Lens.schedule(lowered);
+    snapshot = Lens.encode(scheduled, lowered);
+    const nodeCount = lowered.nodes ? lowered.nodes.length : 0;
+    say(nodeCount + " nodes · " + snapshot.length + " B"
         + (midiOut ? " · " + midiOut.name : " · not connected"), "ok");
   } catch (e) {
     snapshot = null;
-    say(e.message, "err");    // the compiler's error text IS the documentation
+    say(e.message, "err");
   }
   btnSend.disabled = btnSaveCard.disabled = !(snapshot && midiOut);
 }
 
 function loadText(text) { editor.value = text; paint(); refresh(); }
 
-// ---- WebMIDI ---------------------------------------------------------------------------
+// ---- WebMIDI ------------------------------------------------------------------
 async function connect() {
   if (!navigator.requestMIDIAccess) { say("this browser has no WebMIDI (use Chrome or Edge over http/https, not a file:// page)", "err"); return; }
   try {
     const midi = await navigator.requestMIDIAccess({ sysex: true });
-    midiOut = [...midi.outputs.values()].find(p => /lens/i.test(p.name)) || null;
-    midiIn  = [...midi.inputs.values()].find(p => /lens/i.test(p.name)) || null;
-    if (!midiOut || !midiIn) { say("no card found (looked for a MIDI device named 'Lens')", "err"); return; }
+    midiOut = [...midi.outputs.values()].find(p => /lens|workshop|music thing/i.test(p.name)) || null;
+    midiIn  = [...midi.inputs.values()].find(p => /lens|workshop|music thing/i.test(p.name)) || null;
+    if (!midiOut || !midiIn) { say("no card found (looked for a MIDI device matching lens/workshop/music thing)", "err"); return; }
     midiIn.onmidimessage = (ev) => {
       const m = Lens.parse([...ev.data]);
       if (m && ackWaiter) { const w = ackWaiter; ackWaiter = null; w(m); }
@@ -117,8 +109,6 @@ const recv = (ms = 1500) => new Promise((res, rej) => {
   ackWaiter = (m) => { clearTimeout(t); res(m); };
 });
 
-// WRITE_STATE with retry-on-busy, mirroring cli.js: the card NACKs (busy) while a
-// previous patch waits for its quiet apply moment; back off a beat and resend.
 async function writePatch() {
   for (let t = 0; t < 4; t++) {
     midiOut.send([...Lens.frame(Lens.CMD.WRITE_STATE, snapshot)]);
@@ -138,14 +128,12 @@ async function send() {
   btnSend.disabled = !(snapshot && midiOut);
 }
 
-// Save = send, then SAVE_STATE: the card writes flash and REBOOTS (the USB device drops
-// and re-enumerates; reconnect after).
 async function saveToCard() {
   if (!snapshot || !midiOut) return;
   btnSaveCard.disabled = true;
   try {
     await writePatch();
-    await new Promise(r => setTimeout(r, 700));        // let the quiet-moment apply land first
+    await new Promise(r => setTimeout(r, 700));
     midiOut.send([...Lens.frame(Lens.CMD.SAVE_STATE)]);
     const m = await recv(3000);
     if (m.cmd !== Lens.CMD.ACK) throw new Error("save refused");
@@ -155,7 +143,7 @@ async function saveToCard() {
   refresh();
 }
 
-// ---- wire up the page (listeners FIRST, so nothing below can leave a dead button) ------
+// ---- wire up ------------------------------------------------------------------
 let timer = null;
 editor.addEventListener("input", () => { paint(); clearTimeout(timer); timer = setTimeout(refresh, 250); });
 editor.addEventListener("scroll", syncScroll);
@@ -174,7 +162,6 @@ btnSave.addEventListener("click", () => {
   a.click();
 });
 
-// the example picker: a leading "examples…" placeholder, then every embedded patch
 picker.appendChild(new Option("examples…", ""));
 for (const name of Object.keys(EXAMPLES)) picker.appendChild(new Option(name, name));
 picker.addEventListener("change", () => {

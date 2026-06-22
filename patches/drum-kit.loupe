@@ -1,7 +1,8 @@
 ; a 4-voice drum kit (kick / tom / snare / hat) built natively in loupe.
-;   switch-z up     = beat at clock rate (clocked by pulse-in 1, or internal tempo if unpatched)
-;   switch-z down   = STUTTER: beat rolls at 4x while held
-;   knob-main = wavefold distortion     audio-out 1/2 = mixed kit (same on both)
+;   switch-z up/middle = beat at clock rate (clocked by pulse-in 1, or internal tempo if unpatched)
+;   switch-z down      = STUTTER: beat rolls at 4x while held
+;   knob-main = wavefold distortion     knob-x = tempo (used when pulse-in-1 unpatched)
+;   audio-out 1/2 = mixed kit (same on both)
 
 (def tone-drum (fn (:trig :pitch :sweep :decay => :out)
   (def amp  (envelope :trig trig :decay decay))
@@ -9,27 +10,31 @@
   (<- out (vca (sine (add pitch bend)) amp))))
 
 (def noise-drum (fn (:trig :cut :decay => :out)
-  (<- out (vca (bpf (noise) cut) (envelope :trig trig :decay decay)))))
+  ; noise band: high-pass roar shaped by a low-pass to leave a usable band.
+  (<- out (vca (lpf :in (hpf :in (noise) :cut (div cut 2))
+                    :cut cut)
+               (envelope :trig trig :decay decay)))))
 
 (patch
-  (def clk     (normal pulse-in-1 master))
-  (def beatclk (if (switch-z :down) (follow clk :mult 4) clk))
+  (def master  (clock :bpm 200))
+  (def clk     (normal (pulse-in :1) master))
+  (def beatclk (if (eq (switch :z) VMIN) (follow clk :mult 4) clk))
 
-  (def kick-beat  (tape '(4095 0 0 0 4095 0 0 0)))             ; four-on-the-floor
-  (def snare-beat (tape '(0 0 4095 0 0 0 4095 0)))             ; backbeat
-  (def hat-beat   (tape '(4095 0 4095 0 4095 0 4095 0)))       ; eighths
-  (def tom-beat   (tape '(0 0 0 0 0 0 4095 0)))                ; fill
+  (def kick-beat  (beat '(x . . . x . . .)))   ; four-on-the-floor
+  (def snare-beat (beat '(. . x . . . x .)))   ; backbeat
+  (def hat-beat   (beat '(x . x . x . x .)))   ; eighths
+  (def tom-beat   (beat '(. . . . . . x .)))   ; fill on 7
 
   (def kick-t  (onsets kick-beat  beatclk))
   (def tom-t   (onsets tom-beat   beatclk))
   (def snare-t (onsets snare-beat beatclk))
   (def hat-t   (onsets hat-beat   beatclk))
 
-  (def kick  (tone-drum  kick-t  44 60 20))
-  (def tom   (tone-drum  tom-t   55 36   20))
+  (def kick  (tone-drum  kick-t  Ab2 60 10))
+  (def tom   (tone-drum  tom-t   G3  36 10))
   (def snare (noise-drum snare-t 800  5))
   (def hat   (noise-drum hat-t   4000 1))
 
-  (<- audio-out-1 (wavefold (mix kick snare tom hat :unity) knob-main))
-  (<- audio-out-2 (wavefold (mix kick snare tom hat :unity) knob-main))
-  (<- led-0 (onsets kick-beat beatclk)))
+  (<- (audio-out :1) (wavefold (mix kick snare tom hat) (knob :main)))
+  (<- (audio-out :2) (wavefold (mix kick snare tom hat) (knob :main)))
+  (<- (led :0) (onsets kick-beat beatclk)))

@@ -1,5 +1,7 @@
-; UTILITY: slow LFO — two slow sines drifting in and out of phase; `rephase` sets the drift rate.
+; UTILITY: slow LFO — two slow ramps drifting in and out of phase; `rephase` sets the drift rate.
+; A 1 Hz phasor divided by 20 gives a 20 s ramp (fractional Hz is not representable);
+; :b drifts its divided phase against :a so the pair slide past each other.
 (def slow-lfo (fn (:rephase => :a :b)
-  (def base (clock :hz 0.05))             ; ~20 s cycle
-  (<- a (sine base))
-  (<- b (sine (follow base :mult 1 :drift rephase)))))
+  (def osc (phasor :hz 1))
+  (<- a (follow osc :div 20))
+  (<- b (follow osc :div 20 :drift rephase))))

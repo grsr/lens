@@ -1,20 +1,14 @@
 # Loupe
 
-Loupe is the language you write patches in for the Lens card. The syntax is
-Lisp-flavoured, because nested parens turned out to be a clean way to write a
-patch in text. The compiler wires the patch up; the runtime walks the wires
-48,000 times a second, and the values that fall out drive the jacks.
+Loupe is the language you write Lens patches in. The syntax is Lisp-flavoured,
+because nested parens turned out to be a clean way to describe a patch in text.
+The compiler wires the patch up; the runtime walks the wires 48,000 times a
+second, and the values that fall out drive the jacks.
 
-One thing is genuinely Lisp-spirited: a `lens` is a small codebook that gives
-meaning to the tokens on a tape. The tokens can be data (notes, numbers) or
-references to functions already defined, and which one they are is decided by
-quoting, the same way Lisp uses quoting to split data from code. So a tape can
-hold a tune, a chord progression, or a little program the runtime applies as it
-plays.
-
-This is enough to get you started. It is not a complete reference; the truth is
-the compiler (`compile.js`) and the runtime (`loupe.h`). When something here
-disagrees with them, the code is right.
+This is enough to get you started. It is not a complete reference. The truth is
+`prelude.loupe` (every builtin, its arguments, and a docstring in the comment
+above each `def`) and the runtime in `runtime/`. When something here disagrees
+with them, the code is right.
 
 ## A patch
 
@@ -23,349 +17,482 @@ output:
 
 ```lisp
 (patch
-  (<- audio-out-1 (sine :note A4)))
+  (<- (audio-out :1) (sine :note A4)))
 ```
 
-Two parts: things you name (with `def`), and cables (with `<-`) that wire things
-into the card's outputs.
+Two kinds of line: things you name (with `def`), and cables (with `<-`) that
+wire things into the card's outputs.
 
 ```lisp
 (patch
-  (def melody (tape notes '(C3 Eb3 G3 Bb3)))
-  (def clk    (clock :tempo knob-x))
-  (<- cv-out-1    (v-oct (step melody :clk clk)))
-  (<- pulse-out-1 (tick clk)))
+  (def master (clock :tempo (knob :x)))
+  (def melody (tape '(C3 Eb3 G3 Bb3)))
+  (<- (cv-out :1)    (v-oct (step melody)))
+  (<- (pulse-out :1) (trig)))
 ```
 
-You can look at the patches in `patches/` for more shapes. `hello.loupe`,
-`turing-machine.loupe` and `dubdelay.loupe` are good starting points.
-
-## The cable
-
-`<-` is the only way to send something to a sink (a jack, an LED, a tape, an
-output of a function you defined). It reads sink-first:
-
-```lisp
-(<- audio-out-1 (vca env) (lpf 1500) osc)
-```
-
-means: into `audio-out-1` goes the audio from `osc`, run through
-`lpf 1500`, then through `vca env`. The sink is on the left, the source
-is on the right, and the stages in between read from the source end. As
-nested function calls the same line would be `(vca (lpf osc 1500) env)`;
-the cable form is that expression unfolded into a flat line, which scales
-to long signal chains much more comfortably than nested parens.
-
-There's no `->`. There's no shorthand. If a line wires something into a sink,
-it starts with `<-`.
+The patches in `patches/` show more shapes. `hello.loupe`, `hello-seq.loupe`,
+`turing-machine.loupe` and `discreet-system.loupe` are good starting points.
 
 ## Values
 
-Everything in Loupe is a 12-bit value (0..4095), because that's what the card's
-hardware naturally deals in: the ADC reads in 12 bits, the DAC writes out 12
-bits, so a value at rest is just what the jacks and panel give and take. A jack
-then decides what the value means: `audio-out-1` reads it as a sample,
-`cv-out-1` as a voltage, `pulse-out-1` as a gate (high above the midpoint). The
-same value driving two different jacks does two different things.
+Everything in Loupe is a 12-bit value (0..4095), because that is what the
+card's converters deal in: the ADC reads 12 bits, the DAC writes 12 bits, so a
+value at rest is just what the jacks and panel give and take. A jack then
+decides what the value means: an audio output reads it as a sample, a CV output
+as a voltage, a pulse output as a gate (high above the midpoint). The same
+value driving two different jacks does two different things.
 
-That means you don't have separate "audio" and "control" worlds; you have one
-domain, and the consumer decides. An oscillator can be modulated by a slow
-phasor; a tape of notes can drive a pitch jack or a gate jack; an envelope can
-shape audio or open a filter.
+So there are not separate "audio" and "control" worlds. There is one domain,
+and the consumer decides. An oscillator can be modulated by a slow phasor; a
+tape of notes can drive a pitch jack or a gate jack; an envelope can shape
+audio or open a filter.
 
-There are three handy constants always in scope: `vmin` (0), `vmid` (2048),
-and `vmax` (4095). You'll see them in patches as shorthand for "off",
-"middle", "full".
+Three constants are always in scope, written in capitals by convention (capitals
+mean a constant):
 
-The card's CV input jacks are voltage-neutral hardware, so Loupe gives
-you two ways to read one: `cv-uni-N` (raw 0..vmax, unpatched reads
-midpoint) for things like positions or levels, and `cv-bi-N` (bipolar
-around 0, unpatched reads 0) for things you want to SUM onto a knob as
-modulation. Picking the right one at the call site avoids the surprise
-of an unpatched jack contributing a hidden +vmid when you add it to
-something else.
+- `VMIN` (0) — floor, "off".
+- `VMID` (2048) — bipolar centre, "middle".
+- `VMAX` (4095) — ceiling, "full".
 
-`knob-main`, `knob-x`, and `knob-y` come pre-smoothed (a one-pole
-filter kills the LSB jitter you'd otherwise hear when the knob feeds
-v/oct or any integer mapping) and pre-detented at 0, 2048, 4095 (so
-full-CCW, noon, and full-CW snap cleanly). If you want the raw,
-instant-response reading, `knob-main-raw` / `-x-raw` / `-y-raw` are
-also in scope.
+`OCTAVE` is 12. Note names like `C3`, `Eb4`, `G#2` are bound in the prelude as
+ordinary MIDI numbers, so you can use them in any arithmetic expression:
+`(add C3 OCTAVE)` is a C4.
+
+## The hardware jacks
+
+Every hardware jack uses one call-form, inputs and outputs alike:
+
+```
+(name :label [:interpretation ...])
+```
+
+The label is a keyword, read as "the jack labelled 1", not as arithmetic. An
+out-of-range label is a compile error that names the valid set. Jacks are
+direction-typed: reading an output or writing an input is a compile error.
+
+**Inputs** (used in value position):
+
+- `(cv-in :1)` — a CV input, unipolar 0..VMAX (an unpatched jack reads the
+  midpoint). `(cv-in :1 :bipolar)` centres on 0 (unpatched reads 0), which is
+  what you want when you sum a CV onto a knob as modulation. `(cv-in :1 :v-oct)`
+  reads the jack as a pitch.
+- `(audio-in :1)` — an audio input.
+- `(pulse-in :1)` — a pulse/gate input.
+- `(knob :main)` / `(knob :x)` / `(knob :y)` — the three knobs. Detented by
+  default at the rails and centre so they snap cleanly past ADC jitter. Pass
+  `:detent 0` to read the raw pot, or `:detent N` to set the snap zone
+  half-width.
+- `(switch :z)` — the Z-switch. Returns one of the three rails (`VMIN` down,
+  `VMID` middle, `VMAX` up), so a switch is a three-position knob in the same
+  value domain.
+
+**Outputs** (used as the sink, the left side of a `<-`):
+
+- `(<- (cv-out :1) expr)` — a CV output. `:bipolar` is available here too.
+- `(<- (audio-out :1) expr)`
+- `(<- (pulse-out :1) expr)`
+- `(<- (led :0) expr)` — the panel LEDs, 0..5.
+
+There are no bare aliases like `cv-out-1`. If you want the brevity, define your
+own: `(def out (cv-out :1 :bipolar))`.
+
+`(normal jack default)` reads a jack but falls back to `default` when nothing
+is patched in. It is how a patch takes an external clock when one is present
+and runs on its own tempo otherwise:
+
+```lisp
+(def master (normal (pulse-in :1) (clock :tempo (knob :x))))
+```
+
+## The cable
+
+`<-` is the only way to send something to a sink (a jack, an LED, a tape, or a
+named output of a function you defined). It reads sink-first:
+
+```lisp
+(<- (audio-out :1) (vca env) (lpf :cut 1500) osc)
+```
+
+means: into `audio-out :1` goes the audio from `osc`, run through `lpf` at 1500,
+then through `vca env`. The sink is on the left, the source is on the right, the
+stages in between read from the source end. As a nested expression the same line
+would be `(vca (lpf osc 1500) env)`; the cable form is that expression unfolded
+into a flat line, which scales to long signal chains more comfortably than
+nested parens.
+
+There is no `->` and no shorthand. If a line wires something into a sink, it
+starts with `<-`.
 
 ## Builtins
 
-This is a starting handful, not a reference. There are more, they're being
-added to, and the truth is always the code: each builtin is documented at
-its definition in `compile.js` and `loupe.h`.
+This is a starting handful, not a reference. Every builtin is declared in
+`prelude.loupe` with its arguments, keyword arguments, and a one-line docstring.
+The runtime kernels live in `runtime/`.
 
 - **Oscillators:** `sine`, `triangle`, `saw`, `square`, `phasor`, `noise`.
-- **Tapes (memory):** `tape`, `audio` (an audio buffer), `step` (read one cell
-  per clock tick), `seek` (read at an explicit index), `wave` (play a tape as a
-  sample / wavetable), `tap` (read behind an audio buffer's write head: a delay).
+- **Tapes (memory):** `tape`, `audio` (a blank audio buffer), `step` (read one
+  cell per clock tick), `seek` (read at an index), `lookup` (read an index of a
+  given tape), `wave` (play a tape as a sample or wavetable), `tap` (read behind
+  an audio buffer's write head -- a delay).
 - **Clocks and time:** `clock` (the master), `follow` (a derived clock at a
-  ratio), `tick` (the rising edge of a clock), `every` (a divider).
-- **Filters and shaping:** `vcf` (resonant SVF, lp/bp/hp/notch), `lpf`/`hpf`,
-  `average` (one-pole), `slew`, `wavefold`, `crush`, `dither`.
-- **Envelopes and VCAs:** `envelope`, `vca`, `ring`.
-- **Pitch:** `v-oct`, `snap`, `transpose`, `degree`.
-- **Logic and gates:** `if`, `chance`, `edge`, `toggle`, `schmitt`, `hold`,
+  ratio), `trig` (a trigger pulse on each rising edge, defaults to master), `turns`, `every` (a divider),
   `euclid`.
+- **Filters and shaping:** `vcf` (resonant SVF: lp/hp/bp/notch), `lpf`/`hpf`
+  (one-pole), `average`, `lpg`, `slew`, `wavefold`, `crush`, `envfollow`,
+  `clip`, `saturate`.
+- **Envelopes and gain:** `envelope`, `vca`, `ring`, `mix`.
+- **Arithmetic flags:** `add`/`sub` accept `:sat` to saturate instead of wrap.
+- **Pitch:** `v-oct`, `snap`, `quantise`, `transpose`, `degree`, `pitch`.
+- **Logic and gates:** `if`, `chance`, `trig`, `fall`, `toggle`, `schmitt`, `hold`,
+  `gate`, `diff`, `max`, `min`, `abs`, `rect`, `window`, `connected`, `normal`.
 - **Random:** `random`, `walk`, `spread`.
-- **Routing:** `mix`, `switch`, `morph`, `arrange`.
+- **Drums:** `kick`, `snare`, `hat`.
+- **Selection and routing:** `thru`, `squint`, `switch`.
 
-Most builtins take keyword args (`:rate`, `:clk`, `:scale`, etc.) on top of
-positional ones. If you pass an unknown keyword, the compiler error message
-names the keywords that builtin actually accepts, which is usually faster
-than scrolling through this guide.
+Most builtins take keyword arguments (`:cut`, `:trig`, `:scale`, `:decay`, and
+so on) on top of positional ones. Pass an unknown keyword and the compiler
+error names the keywords that builtin actually accepts.
+
+### Clipping and saturation
+
+`(clip in)` hard-clips a signal to the bipolar audio rails. Use it before writing
+into an audio buffer: buffer writes wrap (not clamp), so an out-of-range signal
+flips polarity and crackles. `clip` before the write prevents that.
+
+`(saturate in :drive d :bias b :mix m :level l)` is a cubic soft-clip. `:drive`
+pre-gains the signal into the curve; `:bias` (bipolar) skews it for even-harmonic
+warmth; `:mix` blends dry and wet; `:level` is output makeup gain. Use it to
+colour a signal rather than to stop crackle.
+
+`(add a b :sat)` and `(sub a b :sat)` saturate at the value rails instead of
+wrapping. Useful when you want overflow to stop at the ceiling rather than fold.
+
+### Connection detection
+
+`(connected jack)` returns `VMAX` when a cable is physically patched into the
+jack, else 0. The check is hardware, so a clock signal that dips to 0 between
+edges still counts as connected.
+
+`(normal jack default)` is sugar: it reads `jack` when connected, and `default`
+otherwise. The common idiom:
+
+```lisp
+(def master (normal (pulse-in :1) (clock :tempo (knob :x))))
+```
 
 ## Phasors
 
-A phasor is a ramp that goes from 0 up to its top and wraps back, over and over.
-It's the engine inside every oscillator and also the engine inside every clock,
-which is one of the things Loupe takes seriously: a slow phasor is a clock, a
-fast one is an oscillator, and there's no real boundary in between. A clock at
-the audio rate is an oscillator. An oscillator slowed to one cycle per beat
-becomes a clock. The same builtin, `phasor`, makes both.
+A phasor is a ramp that climbs from 0 to its top and wraps, over and over. It is
+the engine inside every oscillator and also inside every clock. That is one of
+the things Loupe takes seriously: a slow phasor is a clock, a fast one is an
+oscillator, and there is no real boundary between them. A clock at audio rate is
+an oscillator; an oscillator slowed to one cycle per beat is a clock. The same
+builtin, `phasor`, makes both.
 
-You usually don't write `phasor` directly: `(clock :tempo knob-x)` and
-`(sine :note A4)` both build one for you under the hood. But knowing it's the
-same thing explains why you can ride either one through `follow` to get a
-locked or drifting ratio, or read either one's phase with `spread` to walk a
-tape.
+You usually do not write `phasor` directly: `(clock :tempo (knob :x))` and
+`(sine :note A4)` both build one for you. Knowing it is the same thing explains
+why you can ride either through `follow` for a locked or drifting ratio, or read
+either one's phase to walk a tape.
 
-## Tapes and clocks
-
-A tape is a list of 12-bit values. You can author it (`(tape notes '(C3 D3 ...))`),
-generate it from a constant expression, or let a `<-` write into it live: writing
-into a tape from a live stream is how the Turing machine in `patches/turing-machine.loupe`
-mutates its loop.
-
-A tape doesn't have to be seeded with anything: `(audio :seconds 1.5)`
-declares an empty buffer that's a 1.5-second blank tape, ready to be written
-into. That's how the dub delay works: the tape is empty, a `<-` cable feeds
-audio into it on every sample, and `tap` reads behind the write head to give
-you the delayed signal. An audio sample is just a 12-bit value like any
-other, so a tape doesn't really know whether it's holding notes, control
-values, or audio. There are a few builtins that make audio-ish patching
-easier (`wave` plays a tape as a sample or wavetable, `tap` reads behind a
-write head as a delay), but underneath they're all the same tape. I'm hoping
-there's a lot of mileage in treating audio as data, and other data as audio:
-feeding a melody tape into `wave` as a wavetable, sampling a live audio
-stream and stepping through it as a sequence, recording control values and
-playing them back at audio rate. That sort of thing.
-
-The card has 128 KB of RAM total for everything that lives in a tape, which
-is not much. Long samples and long delays compete with everything else for
-memory, and you'll hit the ceiling fast. Treat that as a fun constraint.
-
-A clock is just a slow phasor with a tick. `(clock :tempo knob-x)` is the
-master; most readers (`step`, `tap`, `wave`) take a `:clk` arg that defaults
-to master. Want two parts in unison but the second a quarter as fast? Give it
-`(follow master :div 4)` as its clock. `tick` is the rising edge of a clock,
-defaulting to the master clock if you don't pass one (so `(tick)` and
-`(tick master)` are the same; pass a different clock to get its edge
-instead). `every` divides one.
-
-## Feedback (the stranger thing)
-
-A useful way to picture it: every node in Loupe has its own one-sample
-tape built in, holding what the node produced last sample. Reading any
-value reads that one-sample-old version, never the in-flight one. So
-when a node refers to itself, it's just reading its own one-sample tape:
-"me, one sample ago." DSP folk will recognise this as the z^-1 of every
-IIR filter and delay line, applied uniformly.
-
-The explicit-tape kind of feedback (the dub delay writing audio into a
-buffer and reading it back via `tap`, the Turing machine writing each
-new step into the same loop it read from) is the obvious case. The
-per-node, per-sample kind is the same idea zoomed in: any expression
-can reference itself, and it just reads its previous output. Smallest
-possible example:
+A phasor has one named output: `:phase`, the ramp itself. A bare `(phasor ...)`
+used as a value is that ramp. To get a beat pulse, edge-detect the ramp wrap with
+`trig`:
 
 ```lisp
-(def count (feedback c (add c 1)))   ; each sample, c is itself plus one
+(def osc (phasor :tempo (knob :x)))
+(<- (cv-out :1)    (osc :phase))   ; the ramp, e.g. a tape motor
+(<- (pulse-out :1) (trig osc))     ; a pulse on each wrap
 ```
 
-`c` reads its own value from the previous sample, adds 1, that's the
-new `c`. So it counts up by one per sample. Swap the `add c 1` for
-something musical and you have a one-pole filter, or a phasor, or a
-self-oscillating loop.
+`clock` is phasor sugar: `(clock :tempo t)` is `(phasor :tempo t)`, which is why
+a clock and an oscillator are the same engine read two different ways.
 
-That gives you the usual set of things: delay lines and reverbs,
-resonant filters and self-oscillating voices (resonance IS feedback),
-Karplus-Strong plucks (a noise burst through a delay with damping),
-self-mutating sequencers, anything with a loop you want to close.
+`:sync` locks a phasor to an external pulse. `(phasor :sync (pulse-in :1))`
+measures the period between incoming edges, runs at that rate, and resets its
+phase on each edge, so a coarse trigger becomes a smooth continuous phase you can
+subdivide or use as a tape motor. Give it a rate as well, `(phasor :hz 10 :sync
+p)`, and the edge hard-resets the phase instead. An external pulse has to stay
+high for at least 64 samples (about 1.3 ms) to count; a single noisy sample
+is ignored, not a tick.
+
+## Tapes
+
+A tape is a passive buffer of 12-bit cells with a maximum length. It does not
+know whether it holds notes, control values, or audio; a sample is just a 12-bit
+value like everything else. The logic lives in the heads that read and write it,
+which is why loopers, delays and granular all come out of a tiny runtime.
+
+You can author a tape (`(tape '(C3 D3 G3))`), build one from a pattern helper,
+or declare a blank one and write into it live:
+
+```lisp
+(def buf (audio :seconds 1.5))   ; 1.5 s of empty audio buffer
+```
+
+The pattern builders write rhythms and melodies as quoted lists and return a
+tape:
+
+```lisp
+(beat  '(x . x .))        ; gate values: x is a hit, . is a rest
+(notes '(C4 E4 G4 B4))    ; MIDI pitches
+(score '(C4 _ E4 ~))      ; pitch tape plus a gate tape; _ rests, ~ ties
+```
+
+`score` returns two ports, `:notes` and `:rhythm`, that you pick apart the same
+way you read a multi-output function (below). The prelude also ships named
+rhythms to start from and mutate: `four-on-floor`, `backbeat`, `eighths`,
+`tresillo`, `son-clave`, `bossa`, and more.
+
+### Reading and writing a tape
+
+`step` reads one cell per clock tick. `seek` reads at an explicit index.
+`lookup` reads a given tape at an index. Writing into a tape is just a `<-`
+cable whose sink is the tape. The cable carries extra keywords:
+
+- `:trig C` drives the write head from clock `C` (default: master).
+- `:per-sample` writes one cell per audio sample.
+- `:len L` caps the head's cycle length (a literal or a stream).
+- `:when G` only writes while `G` is nonzero.
+- `:blend F` composites the new value into the existing cell with a function
+  `(:old :new)`.
+
+A live wavetable looper writes audio into a buffer one cell per sample while a
+switch is up, then reads it back as one oscillator cycle:
+
+```lisp
+(patch
+  (def loop (audio :seconds 1.5))
+  (<- loop (audio-in :1) :per-sample :when (eq (switch :z) VMAX))
+  (<- (audio-out :1) (wave loop :midi (knob :main))))
+```
+
+The dub delay writes the filtered input plus an attenuated echo back into the
+same buffer, and reads behind the write head with `tap`:
+
+```lisp
+(patch
+  (def buf  (audio :seconds 1.5))
+  (def echo (tap buf :amount (knob :main) :span :interp))
+  (<- buf
+      (vcf :in (add (audio-in :1) (vca echo (knob :y)))
+           :cut (knob :x) :res 1500
+           :port lp)
+      :per-sample)
+  (<- (audio-out :1) (add (audio-in :1) echo))
+  (<- (audio-out :2) (audio-in :1)))
+```
+
+The card has 128 KB of RAM for everything tapes live in. Long samples and long
+delays compete with everything else for memory, and you hit the ceiling fast.
+Treat it as a fun constraint.
+
+## Clocks
+
+A clock is a slow phasor. When the phase rolls over, the clock fires. `(clock :tempo (knob :x))` makes the
+master; the prelude already defines `master`, and most readers (`step`, `tap`,
+`wave`) take a `:trig` argument that defaults to it. `trig` converts a clock (or
+any signal) to a trigger pulse on each rising edge, defaulting to master: `(trig)` and `(trig master)` are the same.
+`follow` derives a related clock: `(follow master :div 4)` runs a quarter as
+fast, `(follow clk :mult 4)` four times as fast. `every` divides one.
+
+The pulse a clock or trigger emits is 65 samples wide by default (about
+1.35 ms). That is snappy but barely visible, so widen it with `:width` when you want a longer gate
+or a light you can see: `(clock :tempo t :width 480)`. To blink an LED on the
+beat, put an envelope on the trig rather than stretching it.
+
+## Feedback
+
+The runtime walks every slot in topological order each sample, so each slot
+reads its inputs' freshly computed values. Cycles in the graph are allowed: the
+compiler finds each cycle and inserts a one-tick delay (`z1`) at one back-edge
+automatically. At audio rate that delay is the z^-1 every IIR filter is built
+on, and inaudible.
+
+So `(def y (add x (vca y 4000)))` compiles and runs: `y` reads the previous
+tick's `y` on its back-edge, scaled by a gain just under one, which is exactly
+what a one-pole filter needs (`vca` is the gain, `mul` is a true product). You
+can also place the delay yourself with `(z1 X)` when the placement matters:
+
+```lisp
+(def count (add (z1 count) 1))   ; each sample, count is itself plus one
+```
+
+Tape feedback is the obvious case: the dub delay writing audio into a buffer and
+reading it back, the Turing machine writing each new step into the loop it read
+from. That is ordinary tape semantics — writes commit at end of tick, reads see
+the previous tick's state. Between the two you get delay lines and reverbs,
+resonant and self-oscillating filters (resonance is feedback), Karplus-Strong
+plucks, self-mutating sequencers, anything with a loop you want to close.
 
 ## Lenses and thru
 
-A tape on its own is just a list of 12-bit values. A `lens` is what gives
-those values meaning. It's a small codebook that maps each cell to something more
-useful: a note, a chord, a function. The built-in `notes` lens turns a number
-into a pitch, which is why `(tape notes '(C3 Eb3 G3 Bb3))` works.
+A tape on its own is a list of 12-bit values. A `lens` gives those values
+meaning. It is a small codebook that maps each cell to something: a note, a
+chord interval, or a function. Whether a lens carries values or functions is
+decided by quoting, the same way Lisp uses quoting to split data from code.
 
-You can also build a lens out of functions you've defined, and then use
-`thru` to apply the function picked by the cell. That's the trick
-`meta-turing-machine.loupe` is built on:
+A lens is callable as a function of its index, and `thru` is the explicit form:
+`(thru list idx)` returns the `idx`-th cell. An out-of-range index wraps, which
+is musical. If the cell is a value you get the value; if it is a function you
+apply it with ordinary parens:
 
 ```lisp
-(def same  (fn (:n) n))
-(def oct   (fn (:n) (transpose n 12)))
-(def flip  (fn (:n) (sub 120 n)))
-(def fifth (fn (:n) (transpose n 7)))
-(def ops   (lens same oct flip fifth))       ; the lens lists four functions
-
-(def prog (tape ops '(same oct flip oct)))   ; a tape that stores their indices
-...
-(def v2 (thru ops (step prog :clk bar) v1))  ; pick a function from prog, apply to v1
+((thru ops idx) note)   ; pick a function from ops, apply it to note
 ```
 
-So one tape holds the tune, another tape holds a little program of
-transformations, and `thru` reads the program tape and applies whichever
-operation it points at to each note as it goes. Whether a lens carries
-values or function references is decided by quoting, the same way Lisp uses
-quoting to separate data from code.
+Lists must be homogeneous, all values or all functions, so that "apply or not"
+is decidable. Symbols in a list resolve against the environment (note names,
+your own `def`s); an unbound symbol is a compile error, which catches typos.
+
+`squint` is sugar for indexing a lens by a control. It spreads the selector
+across the list length so a 0..VMAX value (a knob, a switch rail) lands on a
+valid cell:
+
+```lisp
+(squint '(maj3 min3 aug) (knob :x))   ; knob picks a chord
+((squint ops sel) note)             ; control picks an op and applies it
+```
+
+The meta Turing machine is built on this: one tape holds a tune, another holds
+a little program of note transformations, and `thru` reads the program tape and
+applies whichever operation it points at:
+
+```lisp
+(def same (fn (:n) n))
+(def up   (fn (:n) (transpose n 12)))
+(def flip (fn (:n) (sub 120 n)))
+(def down (fn (:n) (transpose n -12)))
+(def ops  (lens same up flip down))     ; a lens of four functions
+
+(def prog (tape ops '(same up flip down)))   ; a tape of their indices
+(def v2   ((thru ops (step prog :trig bar)) v1))
+```
+
+The prelude ships scales and chords as lenses of semitone offsets: `minor`,
+`major`, `dorian`, `chromatic` (scales), and `maj3`, `min3`, `dim`, `aug`,
+`sus2`, `sus4`, `maj7`, `min7`, `dom7`, `dim7` (chords). Pair a scale with
+`(snap note :scale minor)` to pin a pitch to it.
 
 ## Functions
 
-A function in Loupe is a little module with named inputs and outputs. You
-declare a function the same way you declare a tape: `fn` makes the function
-shape, `def` binds it to a name, exactly like `tape` makes a tape and `def`
-names it. `def` is the only binder, and what you bind to a name can be a
-tape, a function, a clock, or any other expression.
+A function in Loupe is a small module with named inputs and outputs. You declare
+one the same way you declare a tape: `fn` makes the shape, `def` binds it to a
+name. `def` is the only binder, and what you bind can be a tape, a function, a
+clock, or any expression.
 
-The simplest functions take some inputs and return one value. The body is
-just the expression to return:
+The simplest functions take inputs and return one value. The body is the
+expression to return:
 
 ```lisp
 (def lopass-gate (fn (:in :ping :decay)
   (lpg in (envelope :trig ping :decay decay))))
 ```
 
-That's a function called `lopass-gate` with three named inputs (`in`, `ping`,
-`decay`), and its body builds a low-pass gate from them. It's called like any
-other builtin: `(lopass-gate audio-in-1 pulse-in-1 knob-x)`.
+It is called like any builtin: `(lopass-gate (audio-in :1) (pulse-in :1) (knob :x))`.
 
-If a function needs more than one output, list them after `=>`, then write
-each one into its named output with `<-`, the same way a patch wires the
-card's jacks:
+If a function needs more than one output, list them after `=>` and write each
+one with `<-`, the same way a patch wires the card's jacks:
 
 ```lisp
 (def wavefolder (fn (:in :drive :trig :steps => :out :random :clock)
   (<- out    (wavefold in drive))
-  (<- random (cv (mul (spread (random :clk trig) steps) (div vmax steps))))
+  (<- random (cv (mul (spread (random :trig trig) steps) (div VMAX steps))))
   (<- clock  (toggle trig))))
 ```
 
-The shape before `=>` is the input list; after `=>` is the output list.
-Callers pick a particular output with a keyword: `(wf :random)`, `(wf :clock)`.
+The shape before `=>` is the input list, after it the output list. A caller
+picks an output with a keyword: `(wf :random)`, `(wf :clock)`.
 
 ### Keywords and defaults
 
-The leading colon on `:in`, `:decay`, `:scale`, `:tempo` and so on is just how
-Loupe writes named arguments. You see them on both sides of the language:
-declared on a function's signature, and used by callers to set a particular
-argument by name. `(envelope :decay 32)` and `(envelope :trig ping :decay 12)`
-both work; the keyword tells the builtin which slot you mean.
+The leading colon on `:in`, `:decay`, `:scale` and so on is how Loupe writes
+named arguments. You see them declared on a function's signature and used by
+callers to set an argument by name: `(envelope :trig ping :decay 12)`.
 
-A parameter in an `fn` signature can carry a default value, written as the
-value that follows it:
+A parameter can carry a default, written as the value that follows it:
 
 ```lisp
-(def lopass-gate (fn (:in :ping :decay 32)   ; decay defaults to 32 if not passed
+(def lopass-gate (fn (:in :ping :decay 32)   ; decay defaults to 32
   (lpg in (envelope :trig ping :decay decay))))
 ```
 
-Callers can then omit `:decay` and get 32, or pass `:decay 64` to override it.
+Keywords are only ever labels and argument keys. They are never runtime values;
+enum-like names are plain symbols in a list, not keywords.
 
 ### Most parameters accept streams
 
-Almost any parameter that takes a value will also take a stream: an
-expression that produces a new value every sample. That's how modulation works
-in Loupe. The thing on the other end of the wire doesn't know whether it was
-handed a constant, a knob reading, an LFO, or another oscillator, because at
-the per-sample level they're all the same: a value coming in.
+Almost any parameter that takes a value also takes a stream: an expression that
+produces a new value every sample. That is how modulation works. The thing on
+the other end of the wire does not know whether it was handed a constant, a knob,
+an LFO or another oscillator, because at the per-sample level they are all the
+same: a value coming in.
 
 ```lisp
-(lpf in 1500)                            ; fixed cutoff
-(lpf in knob-y)                          ; cutoff follows a knob
-(lpf in (add knob-y (mul lfo 800)))      ; cutoff modulated by an LFO around a knob
+(lpf :in x :cut 1500)                            ; fixed cutoff
+(lpf :in x :cut (knob :y))                        ; cutoff follows a knob
+(lpf :in x :cut (add (knob :y) (vca lfo 800)))    ; cutoff modulated around a knob
 ```
 
-The builtin's documentation says which arguments work this way. In practice
-it is most of them.
+### Patches and libraries
 
-`patch` is just a function whose inputs and outputs are the card's hardware:
-the jacks, LEDs and panel controls. You don't declare its signature because
-the card declares it for you. Everything else is the same: `def`s bind names,
-`<-`s wire things into the outputs.
+`patch` is a function whose inputs and outputs are the card's hardware: the
+jacks, LEDs and panel. You do not declare its signature because the card
+declares it for you. Everything else is the same: `def`s bind names, `<-`s wire
+the outputs.
 
-That means a library is simply a file of `def`s, mostly `fn`s, that another
-patch can `(use)`:
+So a library is a file of `def`s, mostly `fn`s, that another patch can `use`:
 
 ```lisp
-(use lopass-gate)
-(use wavefolder)
+(use utility-pair/lopass-gate)
+(use utility-pair/wavefolder)
 (patch
-  (<- audio-out-1 (lopass-gate audio-in-1 pulse-in-1 knob-x)))
+  (<- (audio-out :1) (lopass-gate (audio-in :1) (pulse-in :1) (knob :x))))
 ```
 
-From the CLI, `(use foo)` reads `foo.loupe` from the patch's own directory.
-From the web UI, it fetches over same-origin HTTP from `patches/`, so user-
-typed `(use)` resolves to files served alongside the page.
+From the CLI, `(use foo)` reads `foo.loupe` from the patch's own directory. From
+the web editor it fetches the same file served alongside the page.
+`patches/utility-pair/` is the worked example: a folder of small single-purpose
+`fn` files (low-pass gate, wavefolder, sample-and-hold, slew, quantiser, and
+more) plus a thin patch that wires two of them to the two halves of the
+faceplate. None of the utilities are special to that patch; any patch can `use`
+any of them.
 
-For a worked-through example of this style, look at `patches/utility-pair/`.
-It's after Chris Johnson's Utility-Pair card for the Workshop System: a folder
-of small `fn` files, each one a single utility (low-pass gate, wavefolder,
-sample-and-hold, slew, etc.), and a thin `pair.loupe` that wires two of them to
-the two halves of the card's faceplate. I used it as a way to push on Loupe
-and check it could express enough useful things; some of them, like the
-wavefolder, ended up implemented in C in the runtime rather than in Loupe (see
-below). None of those utilities are special to that patch though, they're just
-`fn`s in files: any patch can `(use)` any of them and combine them however it
-likes.
+## Built into the runtime versus written in Loupe
 
-## Built into the runtime vs written in Loupe
+Some things you might expect to be Loupe builtins are C kernels in `runtime/`:
+oscillators, filters, the wavefolder, envelopes, the drum voices, the delay-line
+read. These are hot per-sample DSP, and writing them in C keeps the audio loop
+fast enough to hold 48 kHz. The C runtime is the source of truth for what they
+do; the JavaScript interpreter exists for development.
 
-Some things you might expect to be Loupe builtins are actually C kernels inside
-`loupe.h`: oscillators, filters, the wavefolder, envelopes, the drum voices,
-the delay-line read. These are hot per-sample DSP, and writing them in C
-keeps the audio interrupt fast enough to stay at 48 kHz.
+The compositional work stays in Loupe: routing, gates and conditional logic,
+clock derivation, anything that wires existing primitives together. The line is
+pragmatic. If a function would have to run every sample and do real arithmetic,
+it tends to end up in C; if it is about how things connect, it lives in Loupe.
 
-The compositional stuff stays in Loupe: routing, gates and conditional logic,
-clock derivation, anything that wires existing primitives together. The line
-between the two is mostly pragmatic. If a function would have to run on every
-sample and do real arithmetic, it tends to end up in C; if it's about how
-things are connected, it lives in Loupe.
+## A couple of idioms
 
-## A couple of idioms worth knowing
+`random` returns the full 0..VMAX range, so `(snap (random) :scale minor)` pins
+to the top note of the scale, rarely what you want. Map it into a useful range
+first: `(snap (add C3 (spread (random) 25)) :scale minor)` gives two octaves of
+minor-scale notes from C3.
 
-`random` returns the full 0..vmax range, so `(snap (random) :scale minor)`
-pins to the top note of the scale, which is rarely what you want. Map random
-into a useful range first: `(snap (add 48 (spread (random) 25)) :scale minor)`
-gives you two octaves of minor-scale notes starting at C3.
+Long signal chains read better broken into `def`s with named intermediates.
+Nothing stops you writing a six-stage cable, but a reader (including future you)
+will thank you for naming the envelope, the filtered tone, and the gated output.
 
-Long signal chains in `<-` are clearer if you break them up with `def`s
-and give the intermediates names. Nothing stops you writing a six-stage
-cable, but a reader (including future you) will thank you for naming the
-envelope, the filtered tone, and the gated output as their own bindings.
-
-The compiler tries to be clever about removing redundancy. A constant
-compiles once. Anything you name with `def` compiles once, and every
-reference to the name is that same shared node. Two identical expressions
-written textually in different places usually merge into a single node
-too. So you can repeat yourself for clarity and pay no runtime cost.
-
-One exception worth knowing about: pure-entropy builtins (`random`,
-`noise`, `walk`, `chance`) and feedback builtins (`feedback`, `z1`) stay
-separate copies when you write them in two places, because that's almost
-always what you actually wanted. If you DO want one shared random across
-the patch, name it: `(def jitter (random))`. That's the whole story, and
-it's the aspiration anyway ;)
+The compiler removes redundancy. A constant compiles once. Anything you name
+with `def` compiles once, and every reference is the same shared node. Two
+identical expressions written in different places usually merge too, so you can
+repeat yourself for clarity and pay no runtime cost. The exception is
+pure-entropy builtins (`random`, `noise`, `walk`, `chance`) and feedback
+(`feedback`, `z1`): these stay separate copies, because that is almost always
+what you wanted. If you do want one shared random, name it:
+`(def jitter (random))`.
 
 ## A note on bugs
 
 The compiler is fussy about some shapes and lax about others; this is a hobby
 project shared as-is. If you find something that looks wrong, it probably is.
-Please report it.
-
-Have fun rummaging.
+Please report it. Have fun rummaging.

@@ -1,7 +1,8 @@
 ; UTILITY: Turing 185 — a looping tape, a chance-gated rewrite, an output quantiser.
-; `prob` = mutation probability (0 locked .. full chaos); `transpose` shifts the read.
-(def turing-185 (fn (:prob :transpose => :out :trig)
+; `prob` = mutation probability (0 locked .. full chaos); `trans` shifts the read.
+; :trans is named so it does not shadow the transpose op used in the body.
+(def turing-185 (fn (:prob :trans => :out :trig)
   (def loop (tape '(800 1600 2400 3200 800 1600 2400 3200)))
-  (<- loop (switch (chance prob) (step loop) (random)))
-  (<- out  (quantise (transpose (transpose (spread (step loop) 24) (spread transpose 24)) 48) minor))
-  (<- trig (gate (step loop) trig))))
+  (<- loop (if (chance prob) (step loop) (random)))
+  (<- out  (quantise (transpose (transpose (spread (step loop) 24) (spread trans 24)) 48) minor))
+  (<- trig (trig))))

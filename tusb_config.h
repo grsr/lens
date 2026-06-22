@@ -21,8 +21,10 @@ extern "C" {
 #define CFG_TUD_HID                 0
 #define CFG_TUD_VENDOR              0
 
-// FIFOs sized to hold a full STATE_DUMP (~1050 packed bytes) without dropping.
-#define CFG_TUD_MIDI_RX_BUFSIZE     2048
+// MIDI RX FIFO. Each 3 source bytes pack into 1 four-byte USB MIDI packet,
+// so a SOURCE_CAP (8 KB) sysex payload becomes ~9.4 KB wire + headers,
+// ~3144 packets, ~12.6 KB in the FIFO. 16 KB covers worst case with margin.
+#define CFG_TUD_MIDI_RX_BUFSIZE     16384
 #define CFG_TUD_MIDI_TX_BUFSIZE     2048
 #define CFG_TUD_MIDI_EP_BUFSIZE     64
 

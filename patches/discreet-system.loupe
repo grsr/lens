@@ -1,36 +1,40 @@
 ; after Eno's Discreet Music, though the similarity mostly stops at the name ;)
 ; two scored melodic lines sent to external oscillators and slopes; their audio returns
 ; are summed through a feedback delay.
-;   cv-out 1/2 = pitch     pulse-out 1/2 = gate     audio-in 1/2 = voices back
+;   cv-out 1/2 = pitch     pulse-out 1/2 = trigger     audio-in 1/2 = voices back
 ;   audio-out 1/2 = dry voice + echo     knob-main = feedback     knob-x = tempo     knob-y = voice 2 drift
 ;   patch: cv-out 1/2 -> SineSquare 1/2 v/oct; pulse-out 1/2 -> Slope 1/2 trig;
 ;          Slope 1/2 -> audio-in 1/2 (so the voices return for the feedback delay);
 ;          audio-out 1/2 -> Mix.
 (patch
-  (def feedback knob-main)
-  (def tempo    knob-x)
-  (def drift    knob-y)                              ; noon = locked; past noon the voices phase
+  (def feedback (knob :main))
+  (def tempo    (knob :x))
+  (def drift    (bipolar (knob :y)))                    ; noon = locked; either side drifts the voices apart
   (def master (clock :tempo tempo))
   (def b2     (follow master :mult 1 :drift drift))
 
-  ; _ = hold, ~ = rest
+  ; _ = rest, ~ = tie (holds previous pitch)
   (def t1 (score '(Eb5 _  F5 _ _ ~ ~ ~   C5 Ab4 _ _ ~ ~ ~ ~
                    Eb4 _ _ _ ~ ~ ~ ~   Ab4 _ _ ~ ~ ~ ~ ~)))
   (def t2 (score '(Db5 Eb5 _ _ ~ ~ ~ ~   F4 _ _ _ ~ ~ ~ ~
                    Ab4 _ _ ~ ~ ~ ~ ~   F5 Ab5 Bb5 Ab5 _ ~ ~ ~)))
 
   (def delaybuf (audio :seconds 1.7))
-  (def echo (tap delaybuf :amount vmax :span))   ; fixed full-length delay, no glide
+  (def echo (tap delaybuf :amount VMAX :span))   ; fixed full-length delay, no glide
 
-  (<- cv-out-1    (v-oct (step (t1 :notes) :clk master)))
-  (<- pulse-out-1 (gates (t1 :rhythm) master))
-  (<- cv-out-2    (v-oct (step (t2 :notes) :clk b2)))
-  (<- pulse-out-2 (gates (t2 :rhythm) b2))
+  (<- (cv-out :1 :v-oct) (step (t1 :notes) :trig master))
+  (<- (pulse-out :1) (onsets (t1 :rhythm) :trig master))
+  (<- (cv-out :2 :v-oct) (step (t2 :notes) :trig b2))
+  (<- (pulse-out :2) (onsets (t2 :rhythm) :trig b2))
 
-  (<- delaybuf
-      (lpf :cut 1200)
-      (add (mix audio-in-1 audio-in-2 :unity)
-           (vca echo feedback)))
+  ; sum the dry voices with the attenuated echo, low-pass, then soft-clip into the
+  ; audio range before writing. the delay buffer is signed 12-bit and its write wraps
+  ; (not clamps), so an over-range value would flip polarity and crackle; saturate
+  ; keeps the feedback loop in range with a tape-like knee instead.
+  (def wet (lpf :in (add (mix (audio-in :1) (audio-in :2))
+                         (vca echo feedback))
+                :cut 1200))
+  (<- delaybuf (saturate wet) :per-sample)
 
-  (<- audio-out-1 (mix audio-in-1 echo :unity))
-  (<- audio-out-2 (mix audio-in-2 echo :unity)))
+  (<- (audio-out :1) (mix (audio-in :1) echo))
+  (<- (audio-out :2) (mix (audio-in :2) echo)))

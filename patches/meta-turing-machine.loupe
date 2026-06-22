@@ -1,34 +1,41 @@
 ; like turing-machine.loupe but hunts the transformations applied to a fixed tune, not the notes.
 ;   knob-main = program mutation rate     knob-x = tempo     knob-y = tune mutation rate
+;   switch up = voice 2 drifts against voice 1 (phasing); down/mid = locked
 ;   cv-out 1/2 = plain tune / transformed     pulse-out 1/2 = trigger
 ;   patch: cv-out 1/2 -> SineSquare 1/2 v/oct; pulse-out 1/2 -> Slope 1/2 trig;
 ;          Slope 1/2 -> Mix. audio-out 1/2 carry bench sines as a dry monitor.
 
 ; the four ops; each maps a note to a note
 (def same  (fn (:n) n))
-(def oct   (fn (:n) (transpose n 12)))
+(def up   (fn (:n) (transpose n 12)))
 (def flip  (fn (:n) (sub 120 n)))
-(def fifth (fn (:n) (transpose n 7)))
-(def ops   (lens same oct flip fifth))        ; a lens turns byte k on a tape into op k
+(def down (fn (:n) (transpose n -12)))
+(def ops   (lens same up flip down))        ; a lens turns byte k on a tape into op k
 
 (patch
-  (def master (clock :tempo knob-x))
+  (def master (clock :tempo (knob :x)))
   (def bar    (follow master :div 4))
-  (def tune (tape notes '(C4 E4 G4 B4)))
-  (def prog (tape ops '(same oct flip oct)))
+  (def drift  (follow master :mult 15 :div 16))   ; voice-2 tune clock, 1 beat slower per 16: phases in/out
+  (def tune (tape '(C4 E4 G4 B4)))
+  (def prog (tape ops '(same up flip down)))
 
   ; keep-or-replace: rewrite the program tape each bar, the tune each beat
-  (<- prog (if (chance knob-main :clk bar) (step prog :clk bar) (random :clk bar)) :clk bar)
-  (<- tune (if (chance knob-y) (step tune) (snap (add 48 (spread (random) 25)) :scale minor)))
+  (<- prog (if (chance (knob :main) :trig bar) (step prog :trig bar) (random :trig bar)) :trig bar)
+  (<- tune (if (chance (knob :y)) (step tune) (snap (add C3 (spread (random) 25)) :scale minor)))
 
-  (def v1   (step tune))
-  (def v2   (thru :lens ops :at (step prog :clk bar) :on v1))
-  (def trig (tick master))
-  (<- cv-out-1    (v-oct v1))
-  (<- cv-out-2    (v-oct v2))
-  (<- pulse-out-1 trig)
-  (<- pulse-out-2 trig)
-  (<- audio-out-1 (sine v1))                           ; bench monitor
-  (<- audio-out-2 (sine v2))                           ; bench monitor
-  (<- led-0       (thru :lens ops :at (step prog :clk bar)))
-  (<- led-5       (envelope :trig trig :decay 2)))     ; tempo blink
+  (def v1     (step tune))
+  ; voice 2 = the program transform applied to a note. switch up: read the tune on the
+  ; slow drift clock so the voices slide in/out of phase; else the locked v1. Select the
+  ; NOTE (cheap) so there is a single transform chain, not one per branch.
+  (def v2note (if (gt (switch :z) VMID) (step tune :trig drift) v1))
+  (def v2     ((thru ops (step prog :trig bar)) v2note))
+  (def trig (trig master))
+  (<- (cv-out :1 :v-oct) v1)
+  (<- (cv-out :2 :v-oct) v2)
+  (<- (pulse-out :1) trig)
+  (<- (pulse-out :2) trig)
+  ; bench-monitor sines so audio-out 1/2 carry the two voices dry when no external V/oct is wired.
+  (<- (audio-out :1) (sine v1))
+  (<- (audio-out :2) (sine v2))
+  (<- (led :0)       (step prog :trig bar))   ; show current op index directly
+  (<- (led :5)       (envelope :trig trig :decay 500)))   ; tempo blink

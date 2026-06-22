@@ -8,26 +8,26 @@
 ; or roll your own: (beat x..x..x.) or (euclid pulses steps)
 
 (patch
-  (def tempo (knob :main :default 2600))
-  (def punch (knob :x :default 2800))
-  (def open  (knob :y :default 1300))
+  (def tempo (knob :main))
+  (def punch (knob :x))
+  (def open  (knob :y))
   (def clk   (clock :tempo tempo))
 
   ; a straight backbeat kit
   (def straight
-    (groove :clk clk
+    (groove :trig clk
       (kick  :on four-on-floor :note A1 :drive punch :sweep 3700 :decay 1500)
       (snare :on backbeat      :note C3 :snappy 3600 :tone 2800  :decay 1350)
       (hat   :on eighths       :note A5 :tone 3200   :decay open)))
 
   ; a latin kit
   (def latin
-    (groove :clk clk
+    (groove :trig clk
       (kick  :on son-clave      :note A1 :drive punch :sweep 3500 :decay 1800)
       (snare :on tresillo       :note C3 :snappy 2200 :tone 2600  :decay 1250)
       (hat   :on (euclid 11 16) :note A5 :tone 3400   :decay open)))
 
-  (def kit (if (switch-z :up) latin straight))
-  (<- audio-out-1 kit)
-  (<- audio-out-2 kit)
-  (<- led-0 (hits four-on-floor clk)))
+  (def kit (if (eq (switch :z) VMAX) latin straight))
+  (<- (audio-out :1) kit)
+  (<- (audio-out :2) kit)
+  (<- (led :0) (hits four-on-floor clk)))

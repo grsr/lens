@@ -1,6 +1,6 @@
 ; a dedicated kick drum module with full CV and knob control.
 ;   knob-main = decay (cv-bi-2 adds)     knob-x = drive     knob-y = pitch sweep
-;   switch-z  = octave (down = C1, middle = C2, up = C3)
+;   switch-z  = OCTAVE (down = C1, middle = C2, up = C3)
 ;   cv-bi-1   = pitch offset (+-12 semitones)     pulse-in-1 or pulse-in-2 = trigger
 ;   audio-out 1/2 = kick (mono)     cv-out-1 = pitch as v/oct
 ;   cv-out-2  = inverted amp envelope (for sidechaining: high at rest, dips on kick)
@@ -8,21 +8,22 @@
 ;   patch: pulse-in-1 <- a clock (e.g. 4-voltages or another pulse source);
 ;          audio-out-1 -> Mix; cv-out-2 -> VCA on a bass you want to duck under the kick.
 (patch
-  (def octave-base (add 24 (mul (switch-pos) 12)))    ; 24 + 12*pos = C1/C2/C3
-  (def pitch       (add octave-base (spread cv-bi-1 24)))   ; +-12 semis
-  (def decay       (add knob-main cv-bi-2 :sat))
-  (def drive       knob-x)
-  (def sweep       knob-y)
-  (def trig        (or pulse-in-1 pulse-in-2))
+  (def OCTAVE-base (squint '(C1 C2 C3) (switch :z)))   ; switch pos down/mid/up = C1/C2/C3
+  (def pitch       (add OCTAVE-base (spread (cv-in :1 :bipolar) OCTAVE)))  ; +-12 semis
+  (def decay       (add (knob :main) (cv-in :2 :bipolar) :sat))
+  (def drive       (knob :x))
+  (def sweep       (knob :y))
+  (def clk-fall (normal (pulse-in :1) (onsets four-on-floor)))
+  (def trig     (or clk-fall (pulse-in :2)))
 
   (def voice (kick :midi pitch :decay decay :drive drive :sweep sweep :trig trig))
 
   (def amp     (envelope :trig trig :decay decay))
-  (def ducker  (sub vmax amp))
+  (def ducker  (sub VMAX amp))
 
-  (<- audio-out-1 voice)
-  (<- audio-out-2 voice)
-  (<- cv-out-1    (v-oct pitch))
-  (<- cv-out-2    ducker)
-  (<- pulse-out-1 trig)
-  (<- pulse-out-2 (toggle trig)))
+  (<- (audio-out :1) voice)
+  (<- (audio-out :2) voice)
+  (<- (cv-out :1 :v-oct) pitch)
+  (<- (cv-out :2)    ducker)
+  (<- (pulse-out :1) trig)
+  (<- (pulse-out :2) (toggle trig)))

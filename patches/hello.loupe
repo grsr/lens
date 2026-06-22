@@ -1,4 +1,9 @@
-; the simplest patch: one a4 sine on audio out 1.
-;   patch: audio-out-1 -> Mix or headphones.
+; one sine, main knob picks the pitch across two octaves starting at C3.
+;   knob-main = pitch (C3 to B4)     audio-out-1 = sine
+;
+; (spread knob-main 24) divides the knob into 24 semitone buckets. Each bucket
+; is about 170 ADC units wide, comfortably outside the framework's knob jitter,
+; so the pitch sits stably on each semitone. C3 env-resolves to MIDI 48;
+; the positional pitch on sine is in MIDI domain (no auto-spread).
 (patch
-  (<- audio-out-1 (sine :note A4)))
+  (<- (audio-out :1) (sine (add C3 (spread (knob :main) 24)))))

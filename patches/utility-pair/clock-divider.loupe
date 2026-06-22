@@ -1,5 +1,9 @@
-; UTILITY: clock divider — /2 /4 /8 of an incoming clock, gate and trigger flavours.
-(def clock-divider (fn (:clk => :div2 :div4 :div8)
-  (<- div2 (bipolar (toggle (tick (follow clk :div 2)))))
-  (<- div4 (toggle (tick (follow clk :div 4))))
-  (<- div8 (tick (follow clk :div 8)))))
+; UTILITY: clock divider — /2 /4 /8 of an incoming clock as gate squares. Each
+; toggle halves the rate by flipping on its input's rising edge, so any pulse
+; clock divides (follow divides a phasor, not a bare pulse).
+(def clock-divider (fn (:trig => :div2 :div4 :div8)
+  (def t2 (toggle trig))
+  (def t4 (toggle t2))
+  (<- div2 t2)
+  (<- div4 t4)
+  (<- div8 (toggle t4))))

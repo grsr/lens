@@ -1,9 +1,9 @@
 ; UTILITY: glitch — records ~1.6 s of history; playback jumps to random positions on a glitch
 ; clock, some segments reversed. `reach` = how far back, `rev-prob` = chance a segment reverses.
-(def glitch (fn (:in :clk :reach :rev-prob => :out :trig)
+(def glitch (fn (:in :trig :reach :rev-prob => :out :pulse)
   (def buf (audio :seconds 1.6))
   (<- buf in)
-  (def jump (hold (vca (random :clk clk) :amp reach) clk))
-  (def rev  (chance rev-prob :clk clk))
+  (def jump (hold (vca (random :trig trig) :amp reach) trig))
+  (def rev  (chance rev-prob :trig trig))
   (<- out (if rev (wave buf :reverse :pos jump) (wave buf :pos jump)))
-  (<- trig (gate clk trig))))
+  (<- pulse (trig trig))))

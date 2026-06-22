@@ -1,0 +1,3466 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lens — patch loader</title>
+<style>
+  html { background: #14130f; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+         color: #d8d2c4; font: 13px/1.45 ui-monospace, Menlo, monospace; }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+           border-bottom: 1px solid #34302a; flex-wrap: wrap; }
+  header h1 { font-size: 14px; letter-spacing: .18em; margin: 0 10px 0 0; }
+  button, select { background: #2a2720; color: #d8d2c4; border: 1px solid #4a443a;
+           border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #7d7668; }
+  button:disabled { opacity: .4; cursor: default; }
+  #status { margin-left: auto; color: #7d7668; max-width: 46%; }
+  #status.err { color: #e07a5f; }
+  #status.ok  { color: #9fd08a; }
+  main { flex: 1; position: relative; min-height: 0; }
+  #hl, #editor { position: absolute; inset: 0; margin: 0; padding: 14px 16px;
+                 font: 13px/1.5 ui-monospace, Menlo, monospace; white-space: pre;
+                 overflow: auto; tab-size: 2; }
+  #hl { background: #191712; color: #d8d2c4; pointer-events: none; }
+  #editor { background: transparent; color: transparent; caret-color: #d8d2c4;
+            border: 0; outline: none; resize: none; }
+  #editor::selection { background: #3a4a5a88; }
+  .cmt  { color: #7d7668; }
+  .kw   { color: #c8a2d0; }
+  .num  { color: #d9b08c; }
+  .head { color: #9fd08a; }
+  .p0 { color: #8a8474; } .p1 { color: #a89c7e; } .p2 { color: #7e9ca8; }
+  .p3 { color: #a87e8a; } .p4 { color: #86a87e; }
+  footer { padding: 6px 16px; border-top: 1px solid #34302a; color: #7d7668; }
+  footer a { color: #9c9482; }
+</style>
+<header>
+  <h1>LENS</h1>
+  <select id="picker"></select>
+  <button id="open">open…</button><button id="save">download</button>
+  <input id="filepick" type="file" accept=".loupe" style="display:none">
+  <button id="connect">connect</button>
+  <button id="send" disabled>send</button>
+  <button id="savecard" disabled title="writes the patch to the card's flash; the card reboots">save to card</button>
+  <span id="status"></span>
+</header>
+<main>
+  <pre id="hl" aria-hidden="true"></pre>
+  <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off">; one sine, main knob picks the pitch across two octaves starting at C3.
+;   knob-main = pitch (C3 to B4)     audio-out-1 = sine
+;
+; (spread knob-main 24) divides the knob into 24 semitone buckets. Each bucket
+; is about 170 ADC units wide, comfortably outside the framework's knob jitter,
+; so the pitch sits stably on each semitone. C3 env-resolves to MIDI 48;
+; the positional pitch on sine is in MIDI domain (no auto-spread).
+(patch
+  (&lt;- (audio-out :1) (sine (add C3 (spread (knob :main) 24)))))
+</textarea>
+</main>
+<footer>edits compile as you type &middot; send = play it now &middot; save to card = survives power-off &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://github.com/grsr/lens/blob/main/docs/loupe.md" target="_blank">loupe docs</a></footer>
+<script>
+  window.addEventListener("error", function (e) {
+    var s = document.getElementById("status");
+    if (s) { s.textContent = "error: " + (e.message || (e.error && e.error.message) || "see console"); s.className = "err"; }
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    var s = document.getElementById("status");
+    if (s) { s.textContent = "error: " + ((e.reason && e.reason.message) || e.reason); s.className = "err"; }
+  });
+</script>
+<script>const __LENS_FILES = {"prelude.loupe":"; prelude.loupe -- the standard environment every patch starts with.\n; Shadowable: any def here can be redefined in a patch.\n\n; ===========================================================================\n; CONSTANTS\n; ===========================================================================\n\n(def VMAX 4095)         ; 12-bit ceiling\n(def VMID 2048)         ; bipolar centre / unipolar midpoint\n(def VMIN 0)            ; floor\n(def SMAX 2047)         ; bipolar audio peak (a signed 12-bit sample spans -SMAX..SMAX)\n(def OCTAVE 12)         ; semitones per OCTAVE\n(def MIDI-MAX 127)      ; top MIDI note (= G9); use (spread x (add MIDI-MAX 1)) to map a 0..VMAX control across all pitches\n(def half 2048)         ; VMAX / 2\n(def vmax VMAX) (def vmid VMID) (def vmin VMIN)   ; lowercase aliases\n\n; ---- rhythm + score conventions ----\n; Syms in quoted patterns env-look-up to these.\n(def x    4095)         ; beat hit  (gate high)\n(def .    0)            ; beat rest\n(def _    0)            ; score rest (no note)\n(def ~    4095)         ; score tie  (hold previous)\n\n; ===========================================================================\n; PITCH NAMES: MIDI 0..127, bound by index in chromatic order.\n; C-1=0, C4=60, G9=127. Bare C4 in any expression env-looks-up to 60.\n; (add C4 OCTAVE) = (add 60 12) = 72.\n; ===========================================================================\n\n(def (C-1 C#-1 D-1 D#-1 E-1 F-1 F#-1 G-1 G#-1 A-1 A#-1 B-1\n      C0  C#0  D0  D#0  E0  F0  F#0  G0  G#0  A0  A#0  B0\n      C1  C#1  D1  D#1  E1  F1  F#1  G1  G#1  A1  A#1  B1\n      C2  C#2  D2  D#2  E2  F2  F#2  G2  G#2  A2  A#2  B2\n      C3  C#3  D3  D#3  E3  F3  F#3  G3  G#3  A3  A#3  B3\n      C4  C#4  D4  D#4  E4  F4  F#4  G4  G#4  A4  A#4  B4\n      C5  C#5  D5  D#5  E5  F5  F#5  G5  G#5  A5  A#5  B5\n      C6  C#6  D6  D#6  E6  F6  F#6  G6  G#6  A6  A#6  B6\n      C7  C#7  D7  D#7  E7  F7  F#7  G7  G#7  A7  A#7  B7\n      C8  C#8  D8  D#8  E8  F8  F#8  G8  G#8  A8  A#8  B8\n      C9  C#9  D9  D#9  E9  F9  F#9  G9))\n\n; flat aliases: Db=C#, Eb=D#, Gb=F#, Ab=G#, Bb=A# for every octave -1..9.\n; Cb_n=B_(n-1), Fb_n=E_n for completeness.\n(def Db-1 C#-1) (def Eb-1 D#-1) (def Fb-1 E-1) (def Gb-1 F#-1) (def Ab-1 G#-1) (def Bb-1 A#-1)\n(def Cb0  B-1) (def Db0  C#0)  (def Eb0  D#0)  (def Fb0  E0)  (def Gb0  F#0)  (def Ab0  G#0)  (def Bb0  A#0)\n(def Cb1  B0)  (def Db1  C#1)  (def Eb1  D#1)  (def Fb1  E1)  (def Gb1  F#1)  (def Ab1  G#1)  (def Bb1  A#1)\n(def Cb2  B1)  (def Db2  C#2)  (def Eb2  D#2)  (def Fb2  E2)  (def Gb2  F#2)  (def Ab2  G#2)  (def Bb2  A#2)\n(def Cb3  B2)  (def Db3  C#3)  (def Eb3  D#3)  (def Fb3  E3)  (def Gb3  F#3)  (def Ab3  G#3)  (def Bb3  A#3)\n(def Cb4  B3)  (def Db4  C#4)  (def Eb4  D#4)  (def Fb4  E4)  (def Gb4  F#4)  (def Ab4  G#4)  (def Bb4  A#4)\n(def Cb5  B4)  (def Db5  C#5)  (def Eb5  D#5)  (def Fb5  E5)  (def Gb5  F#5)  (def Ab5  G#5)  (def Bb5  A#5)\n(def Cb6  B5)  (def Db6  C#6)  (def Eb6  D#6)  (def Fb6  E6)  (def Gb6  F#6)  (def Ab6  G#6)  (def Bb6  A#6)\n(def Cb7  B6)  (def Db7  C#7)  (def Eb7  D#7)  (def Fb7  E7)  (def Gb7  F#7)  (def Ab7  G#7)  (def Bb7  A#7)\n(def Cb8  B7)  (def Db8  C#8)  (def Eb8  D#8)  (def Fb8  E8)  (def Gb8  F#8)  (def Ab8  G#8)  (def Bb8  A#8)\n(def Cb9  B8)  (def Db9  C#9)  (def Eb9  D#9)  (def Fb9  E9)  (def Gb9  F#9)\n\n; ===========================================================================\n; HELPER FNS (composed from primitives)\n; ===========================================================================\n\n; value (0..VMAX) -> bipolar (-VMAX..+VMAX) signal.\n(def bipolar  (fn (:x) (sub (mul x 2) VMAX)))\n\n; bipolar (-VMID..+VMID) signal -> value (0..VMAX).\n(def unipolar (fn (:s) (add s VMID)))\n\n; ---- jack-boundary conversions ----\n; signed: identity for audio jacks (DAC accepts signed bipolar samples).\n(def signed     (fn (:x) x))\n; brightness: identity for LEDs (PWM accepts 0..VMAX directly).\n(def brightness (fn (:x) x))\n\n; absolute distance between two values.\n(def dist     (fn (:a :b) (abs (sub a b))))\n\n; hard-clip a signal to the bipolar audio rails (use before an audio-buffer\n; write: the buffer wraps rather than clamps, so an over-range value flips\n; polarity and crackles). For a soft knee use `saturate` instead.\n(def clip     (fn (:in) (min (max in (sub 0 SMAX)) SMAX)))\n\n\n; ===========================================================================\n; SCALES (semitone offsets from a root)\n; ===========================================================================\n\n(def minor      (lens '(0 2 3 5 7 8 10)))\n(def major      (lens '(0 2 4 5 7 9 11)))\n(def minor-pent (lens '(0 3 5 7 10)))\n(def major-pent (lens '(0 2 4 7 9)))\n(def dorian     (lens '(0 2 3 5 7 9 10)))\n(def phrygian   (lens '(0 1 3 5 7 8 10)))\n(def lydian     (lens '(0 2 4 6 7 9 11)))\n(def mixolydian (lens '(0 2 4 5 7 9 10)))\n(def chromatic  (lens '(0 1 2 3 4 5 6 7 8 9 10 11)))\n\n; 12-bit pitch-class masks per scale; pair with (snap :scale ...).\n(def scale-masks (lens '(1453 2741 1193 661 1709 1451 2773 1717 4095)))\n\n; ===========================================================================\n; BUILTINS -- primitive ops the runtime implements directly.\n; Empty fn body = a primitive implemented by a C kernel of the same name.\n; The params list the full call surface.\n; ===========================================================================\n\n; ---- value arithmetic ----------------------------------------------------\n(def add       (fn (:a :b)))\n(def sub       (fn (:a :b)))\n(def mul       (fn (:a :gain)))\n(def div       (fn (:a :n)))\n(def mod       (fn (:a :n)))\n(def transpose (fn (:in :by)))\n(def invert    (fn (:in)))\n(def spread    (fn (:in :n)))\n(def shift     (fn (:in :by)))\n(def mask      (fn (:in :mask)))\n(def bit       (fn (:in :n)))\n(def xor       (fn (:a :b)))\n(def and       (fn (:a :b)))\n(def or        (fn (:a :b)))\n\n; ---- comparisons (return 0 or VMAX) --------------------------------------\n(def gt  (fn (:a :b)))\n(def gte (fn (:a :b)))\n(def lt  (fn (:a :b)))\n(def lte (fn (:a :b)))\n(def eq  (fn (:a :b)))\n(def ne  (fn (:a :b)))\n\n; ---- panel / jack leaves -------------------------------------------------\n; Uniform call-form: (name :label [:interpretation...]). Every read is 0..VMAX.\n; (knob :main) detents the rails (half-width 96); :detent 0 reads raw.\n; (cv-in :1) is unipolar 0..VMAX; :bipolar centres on 0; :v-oct reads pitch.\n; (switch :z) returns the rails VMIN/VMID/VMAX (down/middle/up).\n(def knob     (fn (:main :x :y :detent)))\n(def cv-in    (fn (:bipolar :v-oct)))\n(def pulse-in (fn ()))\n(def audio-in (fn ()))\n\n; ---- oscillators ---------------------------------------------------------\n(def phasor   (fn (:pitch :hz :rate :tempo :cents :sync :fm :depth :width => :phase)))\n(def sine     (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :cents :phase)))\n(def triangle (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :cents :phase)))\n(def saw      (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :cents :phase)))\n(def square   (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :width :cents :phase)))\n(def follow   (fn (:base :mult :div :rate :drift)))\n\n; ---- audio shaping -------------------------------------------------------\n(def average  (fn (:in :cut)))\n(def lpf      (fn (:in :cut :poles :hz)))\n(def hpf      (fn (:in :cut :poles :hz)))\n(def lpg      (fn (:in :ctrl)))\n(def envfollow (fn (:in :cut)))\n(def vcf      (fn (:in :cut :res => :lp :hp :bp :notch)))\n(def envelope (fn (:trig :gate :decay :peak)))\n(def slew     (fn (:in :rate)))\n(def vca      (fn (:in :amp)))\n(def ring     (fn (:in :amp)))\n; average of its inputs (safe, can't clip). :levels '(w0 w1 ...) weights them,\n; normalised to the weight sum. For a unity-gain sum use `add` instead.\n(def mix      (fn (:a :b :levels)))\n(def wavefold (fn (:in :drive)))\n(def crush    (fn (:in :rate)))\n; cubic soft-clip. :drive pre-gains into the curve, :bias (bipolar) skews it for\n; even-harmonic warmth, :mix blends dry/wet, :level is output makeup gain.\n(def saturate (fn (:in :drive :bias :mix :level)))\n\n; ---- generators ----------------------------------------------------------\n(def noise   (fn (:hz :rate)))\n(def random  (fn (:shape :trig)))\n(def chance  (fn (:p :trig)))\n(def walk    (fn (:step :trig)))\n\n; ---- edge detectors / clock state ----------------------------------------\n(def hold    (fn (:val :on)))\n(def toggle  (fn (:in)))\n(def schmitt (fn (:in :lo :hi)))\n(def gate    (fn (:in :thresh :len)))\n; a clock is just a phasor (a phase ramp) named for timebase intent. Rate kwargs and\n; :sync forward to the phasor; unset ones drop. A consumer edge-detects the ramp.\n(def clock   (fn (:tempo :hz :bpm :rate :width :sync)\n  (phasor :tempo tempo :hz hz :bpm bpm :rate rate :width width :sync sync)))\n\n; the master clock every CLK_OP defaults to. Defined after clock/phasor.\n(def master (clock :bpm 120))\n(def z1      (fn (:x)))\n(def feedback (fn ()))\n(def diff    (fn (:in)))\n; trig: a clock's BEAT = the phase wrap (the ramp's reset). Lands on the downbeat for\n; any division/multiplication. No :trig -> defaults to master (CLK_OPS injection).\n(def trig    (fn (:trig)))\n(def turns   (fn (:trig)))\n; edge: a RISING edge of a signal (a pulse arriving, a comparison becoming true).\n(def edge    (fn (:in)))\n; fall: a FALLING edge of a signal.\n(def fall    (fn (:x)))\n(def detent  (fn (:x :width)))\n(def range   (fn (:in :to-index :to-value)))\n(def every   (fn (:n)))\n(def euclid  (fn (:pulses :steps :trig)))\n(def groove  (fn (:pattern :trig)))\n\n; ---- tape heads ----------------------------------------------------------\n; Cable form: (<- SINK SOURCE [:trig C] [:per-sample] [:len L] [:when G] [:blend F])\n;   :trig C      drives the recordhead's clock from C; default = master.\n;   :per-sample  head writes one cell per audio sample.\n;   :len L       caps the head's cycle length (literal int or stream).\n;   :when G      only write while G is nonzero.\n;   :blend F     fn (:old :new) -> :result for compositing into existing cells.\n\n(def lookup  (fn (:tape :index :len)))\n(def step    (fn (:tape :trig :len)))\n(def seek    (fn (:tape :index :trig :len)))\n(def len     (fn (:tape)))\n(def counter (fn (:bars :trig)))\n(def wave    (fn (:tape :note :midi :pos :once :slots :pick :scan :interp :reverse :expand :len)))\n(def tap     (fn (:tape :amount :span :interp)))\n(def record  (fn ()))\n\n; ---- selectors / converters ---------------------------------------------\n; (switch :z) reads the panel z-switch as rails (VMIN/VMID/VMAX). Panel INPUT only.\n; To select a value, use (thru (lens a b ...) idx) for index or (if cond a b) for boolean.\n(def switch   (fn (:z)))\n(def v-oct    (fn (:note)))\n(def cv       (fn (:in :bipolar)))\n(def snap     (fn (:note :scale)))\n(def quantise (fn (:in :scale)))\n(def degree   (fn (:in :scale)))\n(def pitch    (fn (:in :scale)))\n; (thru LIST IDX) -> the IDX-th cell of LIST (out-of-range IDX wraps).\n; A value cell IS the value; an op-lens cell is a fn you apply: ((thru ops IDX) X).\n(def thru     (fn (:list :at)))\n; squint: like thru but spreads the selector across the list length, so a\n; 0..VMAX control (knob, switch rail) lands on a valid cell. ((squint ops sel) x).\n(def squint   (fn (:lens :selector) (thru lens (spread selector (len lens)))))\n\n; ---- value / logic sugar ------------------------------------------------\n(def if     (fn (:cond :then :else)))\n(def not    (fn (:x)))\n(def max    (fn (:a :b)))\n(def min    (fn (:a :b)))\n(def window (fn (:a :lo :hi)))\n(def abs    (fn (:x)))\n(def rect   (fn (:x)))\n\n; ---- onset/gate/hit readers over a tape ---------------------------------\n(def onsets (fn (:tape :trig)))\n(def gates  (fn (:tape :trig)))\n(def hits   (fn (:tape :trig)))\n\n; ---- drum primitives ----------------------------------------------------\n(def kick  (fn (:note :midi :decay :drive :sweep :trig)))\n(def snare (fn (:note :midi :decay :snappy :tone :trig)))\n(def hat   (fn (:note :midi :decay :tone :trig)))\n\n; ===========================================================================\n; PATTERN BUILDERS -- write rhythms and melodies as quoted lists.\n; ===========================================================================\n; (beat '(x . x .))         -> tape of gate values\n; (notes '(C4 E4 G4 B4))    -> tape of MIDI pitches\n; (score '(C4 _ E4 ~))      -> pitch tape + gate tape; _ rests, ~ ties\n\n(def beat  (fn (:pat) (tape pat)))\n(def notes (fn (:pat) (tape pat)))\n; score is an expander form: a quoted list becomes a pitch tape and a\n; rhythm tape. _ and ~ are rests; distinct ties are not yet implemented.\n\n; ===========================================================================\n; RHYTHMS -- classic patterns to start from and mutate.\n; ===========================================================================\n; Step or onset over any of these. Rewrite cells via a chance-gated cable\n; to drift into nearby rhythms while keeping the family.\n\n; quarter notes (kick).\n(def four-on-floor (beat '(x . . . x . . . x . . . x . . .)))\n\n; snare backbeat (2 and 4).\n(def backbeat      (beat '(. . . . x . . . . . . . x . . .)))\n\n; eighth notes (hat).\n(def eighths       (beat '(x . x . x . x . x . x . x . x .)))\n\n; off-beat eighths.\n(def offbeat       (beat '(. . x . . . x . . . x . . . x .)))\n\n; sixteenth notes.\n(def sixteenths    (beat '(x x x x x x x x x x x x x x x x)))\n\n; downbeat only.\n(def downbeat      (beat '(x . . . . . . . . . . . . . . .)))\n\n; 3-3-2 tresillo over 8.\n(def tresillo      (beat '(x . . x . . x .)))\n\n; 2-1-2-1-2 cinquillo over 8.\n(def cinquillo     (beat '(x . x x . x x .)))\n\n; afro-cuban habanera over 8.\n(def habanera      (beat '(x . . x x . . .)))\n\n; 3-2 son clave over 16.\n(def son-clave     (beat '(x . . x . . x . . . x . x . . .)))\n\n; 3-2 rumba clave over 16.\n(def rumba-clave   (beat '(x . . x . . . x . . x . x . . .)))\n\n; bossa nova clave over 16.\n(def bossa         (beat '(x . . x . . x . . . x . . x . .)))\n\n; ===========================================================================\n; SCALES + CHORDS by name (handy in patches without writing intervals)\n; ===========================================================================\n; Each is a lens whose cells are semitone offsets from the root.\n; Pair with `(transpose root degree)` or `(add root (thru chord idx))`.\n; The triads carry the note count (maj3/min3) so they don't shadow the min/max\n; operators or the major/minor scales above.\n\n(def maj3  (lens '(0 4 7)))\n(def min3  (lens '(0 3 7)))\n(def dim   (lens '(0 3 6)))\n(def aug   (lens '(0 4 8)))\n(def sus2  (lens '(0 2 7)))\n(def sus4  (lens '(0 5 7)))\n(def maj7  (lens '(0 4 7 11)))\n(def min7  (lens '(0 3 7 10)))\n(def dom7  (lens '(0 4 7 10)))\n(def dim7  (lens '(0 3 6 9)))\n"};
+
+const __mods = {}, __cache = {};
+function __def(name, fn) { __mods[name] = fn; }
+function __req(name) {
+  if (name === "fs")   return { existsSync: () => false,
+                                readFileSync: () => { throw new Error("fs.readFileSync not available in web bundle"); } };
+  if (name === "path") return { resolve: (...a) => a.filter(Boolean).join("/"),
+                                dirname: (p) => p.split("/").slice(0, -1).join("/") || ".",
+                                basename: (p) => p.split("/").pop(),
+                                join: (...a) => a.join("/") };
+  const key = name.replace(/^\.\.?\//, "");
+  if (!__mods[key]) throw new Error("no module: " + name);
+  if (__cache[key]) return __cache[key].exports;
+  const m = { exports: {} };
+  __cache[key] = m;
+  __mods[key](m, m.exports, __req);
+  return m.exports;
+}
+
+function __webLoadFile(relpath) {
+  if (__LENS_FILES[relpath]) return __LENS_FILES[relpath];
+  return null;
+}
+
+__def("reader.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+
+// Tokenise Loupe text into a flat token list, then parse into AST nodes.
+// Returns an array of top-level forms.
+
+function tokenise(text) {
+  const tokens = [];
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === ';') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === '(') { tokens.push({ kind: 'lparen' }); i++; continue; }
+    if (ch === ')') { tokens.push({ kind: 'rparen' }); i++; continue; }
+    if (ch === "'") { tokens.push({ kind: 'quote' }); i++; continue; }
+    // atom: any run of non-whitespace, non-paren, non-quote chars
+    let j = i;
+    while (j < text.length && !/[\s()'";]/.test(text[j])) j++;
+    tokens.push({ kind: 'atom', text: text.slice(i, j) });
+    i = j;
+  }
+  return tokens;
+}
+
+function classifyAtom(s) {
+  if (/^-?\d+$/.test(s)) return { t: 'num', v: Number(s) };
+  if (/^-?\d+\.\d+$/.test(s)) return { t: 'num', v: Number(s) };
+  if (s.startsWith(':')) return { t: 'kw', s: s.slice(1) };
+  return { t: 'sym', s };
+}
+
+function parse(tokens) {
+  let pos = 0;
+
+  function peek() { return tokens[pos]; }
+  function consume() { return tokens[pos++]; }
+
+  function parseForm() {
+    const tok = peek();
+    if (!tok) throw new Error('Unexpected end of input');
+
+    if (tok.kind === 'quote') {
+      consume(); // consume '
+      const next = peek();
+      if (!next || next.kind !== 'lparen') throw new Error("' must be followed by (");
+      consume(); // consume (
+      const items = [];
+      while (peek() && peek().kind !== 'rparen') {
+        const t = consume();
+        if (t.kind !== 'atom') throw new Error(`Expected atom inside quoted list, got ${t.kind}`);
+        items.push(classifyAtom(t.text));
+      }
+      if (!peek()) throw new Error('Unclosed quoted list');
+      consume(); // consume )
+      return { t: 'quote', items };
+    }
+
+    if (tok.kind === 'lparen') {
+      consume(); // consume (
+      const items = [];
+      while (peek() && peek().kind !== 'rparen') {
+        items.push(parseForm());
+      }
+      if (!peek()) throw new Error('Unclosed list');
+      consume(); // consume )
+      return { t: 'list', items };
+    }
+
+    if (tok.kind === 'atom') {
+      consume();
+      return classifyAtom(tok.text);
+    }
+
+    throw new Error(`Unexpected token kind: ${tok.kind}`);
+  }
+
+  const forms = [];
+  while (pos < tokens.length) {
+    forms.push(parseForm());
+  }
+  return forms;
+}
+
+function read(text) {
+  return parse(tokenise(text));
+}
+
+module.exports = { read };
+
+});
+__def("expander.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+
+const { read } = require('./reader.js');
+
+function makeEnv(parent) {
+  return { bindings: Object.create(null), parent };
+}
+
+function envLookup(env, name) {
+  let e = env;
+  while (e) {
+    if (Object.prototype.hasOwnProperty.call(e.bindings, name)) {
+      return { found: true, value: e.bindings[name] };
+    }
+    e = e.parent;
+  }
+  return { found: false };
+}
+
+function envBind(env, name, value) {
+  env.bindings[name] = value;
+}
+
+// Bind a (def ...) form into env.
+//   (def NAME EXPR)        scalar bind.
+//   (def (a b c))          bind each name to its index 0,1,2,...
+//   (def (a b c) SRC)      destructure SRC's cells, recycling (wrapping) to
+//                          cover the names; a scalar SRC broadcasts to all.
+function bindDef(form, env, ctx) {
+  const target = form.items[1];
+  if (target.t === 'sym') {
+    envBind(env, target.s, expandNode(form.items[2], env, ctx));
+    return;
+  }
+  if (target.t !== 'list') {
+    throw new Error(`def: target must be a name or a name-list, got ${target.t}`);
+  }
+  const names = target.items.map(it => {
+    if (it.t !== 'sym') throw new Error('def: a name-list holds only names');
+    return it.s;
+  });
+  let cells;
+  if (form.items.length >= 3) {
+    cells = destructureCells(expandNode(form.items[2], env, ctx), env);
+    if (cells.length === 0) throw new Error(`def: source for (${names.join(' ')}) has no cells`);
+  } else {
+    cells = names.map((_, i) => ({ t: 'num', v: i }));
+  }
+  for (let i = 0; i < names.length; i++) {
+    envBind(env, names[i], cells[i % cells.length]);
+  }
+}
+
+// Cells of a destructuring source: a collection yields its cells, a scalar
+// yields itself (the caller's modulo wrap broadcasts it).
+function destructureCells(src, env) {
+  if (!src) return [];
+  if (src.t === 'lens')   return src.items;
+  if (src.t === 'oplens') return src.cells;
+  if (src.t === 'tape')   return src.items;
+  if (src.t === 'quote')  return src.items.map(it => {
+    if (it.t === 'sym') { const r = envLookup(env, it.s); if (r.found) return r.value; }
+    return it;
+  });
+  if (src.t === 'outputs') return src.ports.map(p => p.value);
+  return [src];
+}
+
+// A fn body form is "real" (not meta) if it is a list starting with a sym
+// that is not a kw, or is a num/sym that isn't preceded by a kw (i.e., a
+// lone sym or num expression). Meta forms are kw/sym pairs or bare kws.
+// Simplest heuristic: a fn is primitive if ALL body forms are kw atoms or
+// syms that look like meta values, OR the body is empty.
+// A non-primitive fn has at least one list or a lone sym/num that is
+// the return expression.
+function isPrimitiveFn(bodyForms) {
+  if (bodyForms.length === 0) return true;
+  // Walk through pairs: if a form is a kw, the next is its value (meta pair).
+  // If a non-kw form appears outside a meta-pair position, it's a real body.
+  let i = 0;
+  while (i < bodyForms.length) {
+    const f = bodyForms[i];
+    if (f.t === 'kw') {
+      // meta key; skip the value if present
+      i++;
+      if (i < bodyForms.length && bodyForms[i].t !== 'kw') i++; // skip value
+      continue;
+    }
+    // Not a kw -- this is a real expression form.
+    return false;
+  }
+  return true;
+}
+
+// Parse (fn (...) ...) param list into {inputs, outputs}.
+function parseFnParams(listItems) {
+  const inputs = [];
+  const outputs = [];
+  let inOutputs = false;
+  for (const item of listItems) {
+    if (item.t === 'sym' && item.s === '=>') { inOutputs = true; continue; }
+    const name = item.t === 'kw' ? item.s : item.t === 'sym' ? item.s : null;
+    if (name === null) continue;
+    if (inOutputs) outputs.push(name);
+    else inputs.push(name);
+  }
+  return { inputs, outputs };
+}
+
+// Split expanded arg list into positional and keyword args.
+function splitArgs(argNodes) {
+  const positional = [];
+  const kwargs = Object.create(null);
+  let i = 0;
+  while (i < argNodes.length) {
+    const a = argNodes[i];
+    if (a && a.t === 'kw') {
+      const key = a.s;
+      if (i + 1 < argNodes.length && argNodes[i + 1].t !== 'kw') {
+        const val = argNodes[i + 1];
+        // Kwarg passthrough: an unset optional forwarded as `:key key` expands to
+        // a bare self-named symbol (the param was never bound). Drop it so
+        // "optional" carries through a fn body. A mistyped `:key other` keeps its
+        // mismatched symbol and still surfaces, so this does not mask typos.
+        if (!(val.t === 'sym' && val.s === key)) kwargs[key] = val;
+        i += 2;
+      } else {
+        kwargs[key] = { t: 'flag' };
+        i++;
+      }
+    } else {
+      positional.push(a);
+      i++;
+    }
+  }
+  return { positional, kwargs };
+}
+
+// Resolve a score/notes item sym through env; _ and ~ stay as syms (rest/tie).
+function expandScoreItem(node, env) {
+  if (node.t === 'sym' && node.s !== '_' && node.s !== '~') {
+    const r = envLookup(env, node.s);
+    if (r.found) return r.value;
+    throw new Error(`unknown name: ${node.s}`);
+  }
+  return node;
+}
+
+function expandQuoteItems(quoteNode, forNotes, env) {
+  if (!forNotes) return quoteNode.items;
+  return quoteNode.items.map(it => expandScoreItem(it, env));
+}
+
+// Instantiate one op-lens cell with :on and any extra kwargs bound.
+// cell must be a fn node. extraKwargs maps kwarg name -> expanded node.
+// Validates that fn's extra inputs (beyond inputs[0]) are covered by extraKwargs.
+function expandOpLensCell(cell, onArg, cellIdx, ctx, extraKwargs) {
+  if (!cell || cell.t !== 'fn') {
+    throw new Error(`lens cell [${cellIdx}]: expected a fn, got ${cell && cell.t}`);
+  }
+  const inputs = cell.params && cell.params.inputs ? cell.params.inputs : [];
+  if (inputs.length === 0) {
+    throw new Error(`lens cell [${cellIdx}] fn must have at least one input; got 0`);
+  }
+  const extra = extraKwargs || {};
+  // inputs[1..] must all be satisfied by extraKwargs.
+  for (let k = 1; k < inputs.length; k++) {
+    const name = inputs[k];
+    if (!Object.prototype.hasOwnProperty.call(extra, name)) {
+      throw new Error(
+        `lens cell [${cellIdx}] fn requires kwarg :${name} which is not forwarded by thru`
+      );
+    }
+  }
+  // Check that every forwarded kwarg is declared by this fn (inputs[1..]).
+  const extraInputNames = new Set(inputs.slice(1));
+  for (const k of Object.keys(extra)) {
+    if (!extraInputNames.has(k)) {
+      throw new Error(
+        `lens cell [${cellIdx}] fn does not declare forwarded kwarg :${k}`
+      );
+    }
+  }
+  const callFrame = makeEnv(cell.env);
+  envBind(callFrame, inputs[0], onArg);
+  for (const [k, v] of Object.entries(extra)) {
+    envBind(callFrame, k, v);
+  }
+  return expandFnBodySingle(cell.body, callFrame, ctx);
+}
+
+// Classify expanded lens items.
+// Returns {t:'lens', items, names} for all-data, {t:'oplens', cells, names} for op or mixed.
+// Throws on empty lens only. Arity is checked at thru-expansion time when kwargs are known.
+// names: original sym strings before resolution, used by tape subkind resolution.
+function classifyLens(resolved, origNames) {
+  if (resolved.length === 0) throw new Error('lens: must have at least one cell');
+  const hasFn = resolved.some(item => item.t === 'fn');
+  if (hasFn) {
+    const node = { t: 'oplens', cells: resolved };
+    if (origNames) node.names = origNames;
+    return node;
+  }
+  const node = { t: 'lens', items: resolved };
+  if (origNames) node.names = origNames;
+  return node;
+}
+
+// Resolve the LIST argument of (thru LIST IDX) to a lens or oplens node.
+// Accepts a quoted list (cells resolved through env / note names), an already
+// resolved lens/oplens node, or a sym bound to one. Throws on a mixed fn/value
+// list (apply-or-not is undecidable).
+function resolveThruList(listNode, env, ctx) {
+  let resolved = listNode;
+  if (resolved && resolved.t === 'quote') {
+    const cells = resolved.items.map(it => {
+      if (it.t === 'sym') {
+        const r = envLookup(env, it.s);
+        if (r.found) return r.value;
+      }
+      return it;
+    });
+    resolved = classifyLens(cells, resolved.items.map(it => (it.t === 'sym' ? it.s : null)));
+  }
+  if (!resolved) throw new Error('thru: list argument is missing');
+  // A tape is a dynamic data buffer; thru reads cells from it just like a data lens.
+  if (resolved.t === 'tape') return resolved;
+  if (resolved.t === 'lens' || resolved.t === 'oplens') {
+    // Homogeneity: classifyLens already split all-fn (oplens) from any-non-fn (lens).
+    // Catch the genuinely mixed case (some fns, some values) here.
+    if (resolved.t === 'oplens') {
+      const hasValue = resolved.cells.some(c => c.t !== 'fn');
+      if (hasValue) {
+        throw new Error('thru: list mixes fn and value cells; a list must be all-fns or all-values');
+      }
+    }
+    return resolved;
+  }
+  throw new Error(`thru: list argument must be a list/lens, got ${resolved.t}`);
+}
+
+// Build the thru result node from a resolved list + index. Out-of-range index
+// wraps (floored modulo) in the opthru/op_thru lowering.
+// Op-lens: returns an 'oplens-sel' node remembering the cells + index. Applying
+// it (call-head position, applyOplensSel) inlines the picked cell over the args;
+// using it as a value lowers to its index. Data lens/tape: the IDX-th value.
+function buildThru(listResolved, atArg) {
+  if (listResolved.t === 'oplens') {
+    return { t: 'oplens-sel', cells: listResolved.cells, at: atArg };
+  }
+  // A lens whose cells are tapes is a collection of buffers, not of values. The
+  // pick is a tape, so it cannot decode to one value: remember the cells + index
+  // as a buflens-sel and distribute the consuming op over the cells (the op runs
+  // once per tape, op_thru picks the output) when this is used as a call arg.
+  if (listResolved.t === 'lens' && isBufferLens(listResolved)) {
+    return { t: 'buflens-sel', cells: listResolved.items, at: atArg };
+  }
+  return { t: 'call', op: 'thru', args: [listResolved, atArg], kwargs: {} };
+}
+
+// A lens whose cells are all tapes (dynamic buffers), distinct from a data lens
+// whose cells are numbers (a scale, decoded to a value by op_thru).
+function isBufferLens(lensNode) {
+  return lensNode.items.length > 0
+    && lensNode.items.every(it => it && it.t === 'tape');
+}
+
+// Distribute a primitive call over a buflens-sel argument: the call is rebuilt
+// once per tape cell with that arg replaced, and op_thru picks the result value
+// at the selection index. All cells run in lockstep; switching the index swaps
+// which output is read (a stateless demux, the analog "all voices run" model).
+function distributeBufLensSel(name, positional, kwargs, ctx) {
+  const ai = positional.findIndex(a => a && a.t === 'buflens-sel');
+  if (ai < 0) return null;
+  const sel = positional[ai];
+  const results = sel.cells.map(cell => {
+    const args = positional.slice();
+    args[ai] = cell;
+    return { t: 'call', op: name, args, kwargs };
+  });
+  return { t: 'opthru', results, at: sel.at };
+}
+
+// Apply an 'oplens-sel' to call args: inline each cell over the first positional
+// argument, forwarding extra kwargs to each fn cell. Returns an 'opthru' node.
+function applyOplensSel(sel, positional, kwargs, ctx) {
+  const onArg = positional[0];
+  if (!onArg) throw new Error('thru: applied op-lens needs at least one argument');
+  const results = sel.cells.map((cell, i) => expandOpLensCell(cell, onArg, i, ctx, kwargs || {}));
+  return { t: 'opthru', results, at: sel.at };
+}
+
+// Main node expander.
+function expandNode(node, env, ctx) {
+  const { report } = ctx;
+
+  if (node.t === 'num' || node.t === 'kw' || node.t === 'flag') return node;
+
+  if (node.t === 'sym') {
+    const r = envLookup(env, node.s);
+    if (r.found) return r.value;
+    // Unresolved sym: return as-is so kwarg passthrough (:key key) can drop it.
+    // Any sym that reaches the lowerer without being dropped will error there.
+    return node;
+  }
+
+  if (node.t === 'quote') return node; // bare quoted list
+
+  if (node.t !== 'list') return node;
+
+  const items = node.items;
+  if (items.length === 0) return node;
+
+  const head = items[0];
+  if (head.t !== 'sym') {
+    // Collections-are-functions: a head of (thru OPLENS IDX) -- or its sugar
+    // (squint OPLENS SEL) -- applied to args means "the IDX-th op-lens cell
+    // applied to the args". The head expands to an 'oplens-sel' which we apply
+    // here via the opthru machinery (applyOplensSel builds the op_thru node).
+    if (head.t === 'list') {
+      const headExpanded = expandNode(head, env, ctx);
+      if (headExpanded && headExpanded.t === 'oplens-sel') {
+        const callArgs = items.slice(1).map(it => (it.t === 'kw' ? it : expandNode(it, env, ctx)));
+        const { positional, kwargs } = splitArgs(callArgs);
+        return applyOplensSel(headExpanded, positional, kwargs, ctx);
+      }
+      // Inline port-select: a multi-output call as the head, e.g. ((phasor ..) :tick)
+      // or ((vcf ..) :hp), picks a port without binding the call first.
+      if (headExpanded && headExpanded.t === 'outputs') {
+        return expandPortSelect(headExpanded, items.slice(1), env, ctx);
+      }
+      // A thru/squint head applied to args but it picks values, not fns: error.
+      const headSym = head.items[0] && head.items[0].t === 'sym' ? head.items[0].s : null;
+      if (headSym === 'thru' || headSym === 'squint') {
+        throw new Error(
+          `${headSym}: only an op-lens (all-fn list) can be applied to arguments; this list holds values`
+        );
+      }
+    }
+    // Non-sym head -- expand as generic list
+    return { t: 'call', op: '?', args: items.slice(1).map(it => expandNode(it, env, ctx)) };
+  }
+
+  const name = head.s;
+
+  // Special forms.
+
+  if (name === 'fn') {
+    const paramList = items[1] && items[1].t === 'list' ? items[1].items : [];
+    const { inputs, outputs } = parseFnParams(paramList);
+    const bodyForms = items.slice(2);
+    const primitive = isPrimitiveFn(bodyForms);
+    return { t: 'fn', params: { inputs, outputs }, body: bodyForms, env, primitive };
+  }
+
+  if (name === 'lens') {
+    if (items.length === 2 && items[1].t === 'quote') {
+      return { t: 'lens', items: items[1].items };
+    }
+    const cellNodes = items.slice(1);
+    // Capture original sym strings before resolution so tape subkind resolution
+    // can match item names against cell indices at compile time.
+    const origNames = cellNodes.map(it => (it.t === 'sym' ? it.s : null));
+    const resolved = cellNodes.map(it => expandNode(it, env, ctx));
+    return classifyLens(resolved, origNames);
+  }
+
+  if (name === 'tape') {
+    let subkind = null;
+    let quoteNode;
+    if (items.length === 2 && items[1].t === 'quote') {
+      quoteNode = items[1];
+    } else if (items.length >= 3 && items[2] && items[2].t === 'quote') {
+      const sub = items[1];
+      subkind = sub.t === 'sym' ? sub.s : sub.t === 'kw' ? sub.s : null;
+      quoteNode = items[2];
+    } else {
+      quoteNode = items[items.length - 1];
+    }
+    // Resolve a sym arg: (tape pat) where pat is bound to a quote node in the env.
+    if (quoteNode && quoteNode.t === 'sym') {
+      const r = envLookup(env, quoteNode.s);
+      if (r.found && r.value && r.value.t === 'quote') quoteNode = r.value;
+    }
+    const forNotes = subkind === 'notes';
+    const rawItems = quoteNode && quoteNode.t === 'quote'
+      ? expandQuoteItems(quoteNode, forNotes, env)
+      : [expandNode(quoteNode, env, ctx)];
+
+    // Resolve sym cells (x, ., note names, etc.) through the env so lowerTape
+    // receives only num nodes. Throw on any sym that does not resolve.
+    const resolvedItems = rawItems.map(item => {
+      if (item.t !== 'sym') return item;
+      const r = envLookup(env, item.s);
+      if (r.found) return r.value;
+      throw new Error(`unknown name: ${item.s}`);
+    });
+
+    // Subkind name resolution: when subkind names a binding in scope that is a
+    // lens or oplens, resolve each seed item sym to its index in that binding's
+    // cells. Numeric literals pass through as direct indices.
+    let tapeItems = resolvedItems;
+    if (subkind && !forNotes) {
+      const lookup = envLookup(env, subkind);
+      if (lookup.found) {
+        const binding = lookup.value;
+        if (binding.t !== 'lens' && binding.t !== 'oplens') {
+          throw new Error(
+            `tape: subkind "${subkind}" must be a lens or op-lens; got "${binding.t}"`
+          );
+        }
+        const cellNames = binding.names || null;
+        if (!cellNames) {
+          throw new Error(
+            `tape: subkind "${subkind}" has no cell names; cannot resolve items`
+          );
+        }
+        if (rawItems.length === 0) {
+          throw new Error(
+            `tape: subkind "${subkind}" seed must not be empty`
+          );
+        }
+        tapeItems = rawItems.map(item => {
+          if (item.t === 'num') return item; // numeric literal -> direct index
+          const itemName = item.t === 'sym' ? item.s : null;
+          if (itemName === null) {
+            throw new Error(
+              `tape: subkind "${subkind}" seed item must be a sym or number; got "${item.t}"`
+            );
+          }
+          const idx = cellNames.indexOf(itemName);
+          if (idx === -1) {
+            throw new Error(
+              `tape: item "${itemName}" not found in "${subkind}" (cells: ${cellNames.join(', ')})`
+            );
+          }
+          return { t: 'num', v: idx };
+        });
+      }
+      // If subkind does not resolve (not found in env), fall through and keep
+      // raw items (the subkind may be an intrinsic tag handled elsewhere, or
+      // the user misspelled a name -- unresolved syms are already tracked).
+    }
+
+    const result = { t: 'tape', items: tapeItems };
+    if (subkind) result.subkind = subkind;
+    return result;
+  }
+
+  if (name === 'audio') {
+    const rawArgs = items.slice(1).map(it => expandNode(it, env, ctx));
+    const { kwargs } = splitArgs(rawArgs);
+    const result = { t: 'audio' };
+    if (kwargs.seconds !== undefined) result.seconds = kwargs.seconds;
+    if (kwargs.length !== undefined) result.length = kwargs.length;
+    return result;
+  }
+
+  if (name === 'score') {
+    // (score '(NOTE _ ~ NOTE ...)) produces a dual-port object:
+    //   :notes  = the pitch sequence; _ and ~ hold the previous note (a v/oct
+    //             sequencer is a sample-and-hold, so a rest must not drop the
+    //             pitch to 0 = C-1 and pitch-bend the voice's release tail down).
+    //   :rhythm = a tape of 0/4095 gates (4095 for actual notes, 0 for _ and ~).
+    const q = items[1];
+    const rawItems = q && q.t === 'quote' ? expandQuoteItems(q, true, env) : [];
+    const rhythm = rawItems.map(it => {
+      if (it.t === 'sym' && (it.s === '_' || it.s === '~')) return { t: 'num', v: 0 };
+      return { t: 'num', v: 4095 };
+    });
+    // Carry the last sounded pitch through rests/ties; leading rests hold 0.
+    let held = { t: 'num', v: 0 };
+    const noteItems = rawItems.map(it => {
+      if (it.t === 'sym' && (it.s === '_' || it.s === '~')) return held;
+      held = it;
+      return it;
+    });
+    return {
+      t: 'outputs',
+      ports: [
+        { name: 'notes', value: { t: 'tape', subkind: 'notes', items: noteItems } },
+        { name: 'rhythm', value: { t: 'tape', subkind: 'rhythm', items: rhythm } },
+      ],
+    };
+  }
+
+  // (normal JACK DEFAULT): the jack when a cable is patched, else the default.
+  // Sugar over the `connected` predicate.
+  if (name === 'normal') {
+    const jack = expandNode(items[1], env, ctx);
+    const def_ = expandNode(items[2], env, ctx);
+    return { t: 'call', op: 'if',
+             args: [{ t: 'connected', jack }, jack, def_],
+             kwargs: Object.create(null) };
+  }
+
+  // (connected JACK): VMAX if a cable is patched into JACK, else 0.
+  if (name === 'connected') {
+    return { t: 'connected', jack: expandNode(items[1], env, ctx) };
+  }
+
+  if (name === 'morph') {
+    return { t: 'morph', args: items.slice(1).map(it => expandNode(it, env, ctx)) };
+  }
+
+  if (name === 'feedback') {
+    return { t: 'feedback', args: items.slice(1).map(it => expandNode(it, env, ctx)) };
+  }
+
+  if (name === 'z1') {
+    return { t: 'z1', x: expandNode(items[1], env, ctx) };
+  }
+
+  if (name === 'notes') {
+    const arg = items[1];
+    if (arg && arg.t === 'sym') {
+      const r = envLookup(env, arg.s);
+      if (r.found) return r.value;
+      throw new Error(`unknown name: ${arg.s}`);
+    }
+    return { t: 'num', v: 0 };
+  }
+
+  if (name === 'outputs') {
+    const ports = items.slice(1).map(it => {
+      if (it.t === 'list' && it.items.length >= 2) {
+        const portName = it.items[0].s || '?';
+        const value = expandNode(it.items[1], env, ctx);
+        return { name: portName, value };
+      }
+      return { name: '?', value: expandNode(it, env, ctx) };
+    });
+    return { t: 'outputs', ports };
+  }
+
+  // (len LIST): a static lens/oplens/quote folds to its cell count at compile time
+  // (squint needs this to spread the selector across the list length).
+  if (name === 'len' && items.length === 2) {
+    const arg = expandNode(items[1], env, ctx);
+    if (arg && arg.t === 'lens')   return { t: 'num', v: arg.items.length };
+    if (arg && arg.t === 'oplens') return { t: 'num', v: arg.cells.length };
+    if (arg && arg.t === 'quote')  return { t: 'num', v: arg.items.length };
+    if (arg && arg.t === 'num')    return { t: 'num', v: 1 }; // scalar = length-1
+    // Dynamic tape: fall through to the op_len primitive path.
+  }
+
+  // (thru LIST IDX): positional. LIST first, index second. Out-of-range wraps.
+  // A value cell IS the value; an op-lens cell is selected here and applied via
+  // ((thru ops IDX) X) (handled in the non-sym-head path above).
+  if (name === 'thru') {
+    const listNode = expandNode(items[1], env, ctx);
+    // A scalar is a length-1 collection: any index wraps to it.
+    if (listNode && listNode.t === 'num') return listNode;
+    const listResolved = resolveThruList(listNode, env, ctx);
+    const atArg = items[2] !== undefined ? expandNode(items[2], env, ctx) : { t: 'num', v: 0 };
+    return buildThru(listResolved, atArg);
+  }
+
+  // def / <- are handled by body processors but can appear as raw nodes in fn bodies.
+  if (name === 'def' || name === '<-') return node;
+
+  // --- function call or unknown op ---
+
+  const headResolved = envLookup(env, name);
+
+  if (headResolved.found) {
+    const fnNode = headResolved.value;
+
+    if (fnNode && fnNode.t === 'fn') {
+      if (fnNode.primitive) {
+        // Primitive op (defined in prelude but implemented in runtime): emit call node.
+        const rawArgs = items.slice(1).map(it => expandNode(it, env, ctx));
+        const { positional, kwargs } = splitArgs(rawArgs);
+        // Ops that accept :trig default to master when :trig is absent.
+        // SPEC: skip injection when an alternative rate kwarg (:hz, :bpm) is present.
+        const CLK_OPS = new Set(['trig', 'step', 'seek', 'turns', 'every', 'random', 'chance', 'walk',
+          'euclid', 'hits', 'gates', 'onsets', 'groove',
+          'recordhead-per-cell', 'recordhead-gated',
+          'recordhead-len-capped', 'recordhead-len-capped-gated']);
+        if (CLK_OPS.has(name) && !kwargs.trig && !kwargs.hz && !kwargs.bpm) {
+          const masterR = envLookup(env, 'master');
+          if (masterR.found) kwargs.trig = masterR.value;
+        }
+
+        // groove: each drum voice's :on tape becomes a :trig (hits on-tape clk),
+        // and groove is the mix of the voices.
+        if (name === 'groove') {
+          const clkNode = kwargs.trig;
+          if (clkNode) {
+            for (const voiceArg of positional) {
+              if (voiceArg.t === 'call' && voiceArg.kwargs && voiceArg.kwargs.on) {
+                const onVal = voiceArg.kwargs.on;
+                if (onVal.t === 'tape' || onVal.t === 'quote') {
+                  const hitsCall = { t: 'call', op: 'hits', args: [onVal], kwargs: { trig: clkNode } };
+                  const rest = Object.create(null);
+                  for (const [k, v] of Object.entries(voiceArg.kwargs)) {
+                    if (k !== 'on') rest[k] = v;
+                  }
+                  voiceArg.kwargs = Object.assign(Object.create(null), { trig: hitsCall }, rest);
+                }
+              }
+            }
+          }
+          return { t: 'call', op: 'mix', args: positional,
+                   kwargs: Object.assign(Object.create(null), { unity: { t: 'flag' } }) };
+        }
+
+        // A tape argument selected at runtime from a lens of tapes: distribute
+        // this op over each tape and pick the result value at the selection index.
+        const distributed = distributeBufLensSel(name, positional, kwargs, ctx);
+        if (distributed) return distributed;
+
+        // Primitive fn with named outputs: return an outputs node so port selection works.
+        // SPEC: each port gets its own call node with :port baked in; lowerer emits one slot each.
+        const outputs = fnNode.params && fnNode.params.outputs;
+        if (outputs && outputs.length > 0) {
+          // An explicit :port (a name like :port hp, or a number) selects that one
+          // output directly -- sugar for port-select ((op ..) :hp).
+          if (kwargs.port) {
+            const pi = kwargs.port.t === 'num' ? kwargs.port.v
+                     : kwargs.port.t === 'sym' ? outputs.indexOf(kwargs.port.s) : -1;
+            if (pi >= 0 && pi < outputs.length) {
+              const pk = Object.assign({}, kwargs, { port: { t: 'num', v: pi } });
+              return { t: 'call', op: name, args: positional, kwargs: pk };
+            }
+          }
+          const ports = outputs.map((portName, i) => {
+            const portKwargs = Object.assign({}, kwargs, { port: { t: 'num', v: i } });
+            return { name: portName, value: { t: 'call', op: name, args: positional, kwargs: portKwargs } };
+          });
+          return { t: 'outputs', ports };
+        }
+        return { t: 'call', op: name, args: positional, kwargs,
+                 sig: (fnNode.params && fnNode.params.inputs) || undefined };
+      }
+      return expandFnCall(name, fnNode, items.slice(1), env, ctx);
+    }
+
+    if (fnNode && fnNode.t === 'outputs') {
+      return expandPortSelect(fnNode, items.slice(1), env, ctx);
+    }
+
+    // The resolved value is some other node (tape, lens, num, etc.) used as
+    // a positional -- caller is doing something like (step rungle) where rungle
+    // is a tape node. We resolve the name; the surrounding call handles the node.
+    // This shouldn't reach here as call-head... but handle gracefully.
+    return fnNode;
+  }
+
+  // Unknown op.
+  const rawArgs = items.slice(1).map(it => expandNode(it, env, ctx));
+  const { positional, kwargs } = splitArgs(rawArgs);
+  report.unknownOps.add(name);
+  return { t: 'call', op: name, args: positional, kwargs };
+}
+
+function expandPortSelect(outputsNode, argItems, env, ctx) {
+  if (argItems.length === 1 && argItems[0].t === 'kw') {
+    const portName = argItems[0].s;
+    const port = outputsNode.ports.find(p => p.name === portName);
+    if (port) return port.value;
+  }
+  return outputsNode;
+}
+
+// Expand a fn call by inlining the body.
+function expandFnCall(opName, fnNode, argItems, callEnv, ctx) {
+  const rawArgs = argItems.map(it => expandNode(it, callEnv, ctx));
+  const { positional, kwargs } = splitArgs(rawArgs);
+  const { inputs, outputs } = fnNode.params;
+
+  // New frame extends fn.env (def-site) with params bound to call-site values.
+  const callFrame = makeEnv(fnNode.env);
+
+  for (let i = 0; i < inputs.length; i++) {
+    if (i < positional.length) {
+      envBind(callFrame, inputs[i], positional[i]);
+    }
+    // Unbound positionals fall through to fn.env / prelude at lookup time.
+  }
+
+  // Bind kwargs into the call frame so fn body can reference them.
+  for (const [k, v] of Object.entries(kwargs)) {
+    envBind(callFrame, k, v);
+  }
+
+  // Named outputs -> multi-output expansion.
+  if (outputs.length > 0) {
+    return expandFnBodyMulti(fnNode.body, callFrame, outputs, ctx);
+  }
+
+  return expandFnBodySingle(fnNode.body, callFrame, ctx);
+}
+
+// Expand a fn body with named output ports.
+function expandFnBodyMulti(bodyForms, env, outputNames, ctx) {
+  const localEnv = makeEnv(env);
+  const ports = [];
+
+  for (const form of bodyForms) {
+    if (form.t === 'list' && form.items[0] && form.items[0].t === 'sym') {
+      const h = form.items[0].s;
+      if (h === 'def') {
+        bindDef(form, localEnv, ctx);
+        continue;
+      }
+      if (h === '<-') {
+        // (<- PORTNAME VALUE ...) inside fn body
+        const sinkSym = form.items[1];
+        const cable = expandCableInBody(form, localEnv, ctx);
+        if (sinkSym && sinkSym.t === 'sym' && outputNames.includes(sinkSym.s)) {
+          ports.push({ name: sinkSym.s, value: cable.value });
+        } else {
+          // Genuine local cables (tape/buffer writes) get lowered; output-port
+          // bindings do not (the value flows through the returned port).
+          ctx.localCables.push(cable);
+        }
+        continue;
+      }
+    }
+    // Meta kw pairs at the top of fn body -- skip.
+    if (form.t === 'kw') continue;
+    expandNode(form, localEnv, ctx);
+  }
+
+  return { t: 'outputs', ports };
+}
+
+// Expand a fn body and return the last expression.
+function expandFnBodySingle(bodyForms, env, ctx) {
+  const localEnv = makeEnv(env);
+  let last = { t: 'num', v: 0 };
+
+  for (const form of bodyForms) {
+    if (form.t === 'kw') continue; // meta
+    if (form.t === 'list' && form.items[0] && form.items[0].t === 'sym') {
+      const h = form.items[0].s;
+      if (h === 'def') {
+        bindDef(form, localEnv, ctx);
+        continue;
+      }
+      if (h === '<-') {
+        const cable = expandCableInBody(form, localEnv, ctx);
+        ctx.localCables.push(cable);
+        continue;
+      }
+    }
+    last = expandNode(form, localEnv, ctx);
+  }
+
+  return last;
+}
+
+// Expand a (<- SINK VALUE ...) form, returning {sink, value, kwargs}.
+function expandCableInBody(form, env, ctx) {
+  return expandCableForm(form, env, ctx);
+}
+
+function expandCableForm(form, env, ctx) {
+  const items = form.items; // [<-, SINK, args...]
+  const sinkNode = items[1];
+
+  // Expand args (skip the raw kw tokens -- they expand to themselves).
+  const expanded = items.slice(2).map(it => {
+    if (it.t === 'kw') return it;
+    return expandNode(it, env, ctx);
+  });
+
+  const { positional, kwargs } = splitArgs(expanded);
+
+  // Output jacks: (<- (cv-out :1) X). The sink list head is an output-jack
+  // family; carry it through as a structured jacksink for the lowerer to
+  // range-check and resolve. Reading these in value position is rejected
+  // separately in the lowerer.
+  const OUTPUT_JACKS = new Set(['cv-out', 'audio-out', 'pulse-out', 'led']);
+  let sink;
+  if (sinkNode && sinkNode.t === 'list' && sinkNode.items[0]
+      && sinkNode.items[0].t === 'sym' && OUTPUT_JACKS.has(sinkNode.items[0].s)) {
+    const jack = sinkNode.items[0].s;
+    const rest = sinkNode.items.slice(1);
+    const exprItems = rest.filter(it => it.t !== 'kw');
+    if (exprItems.length > 0) {
+      // Computed label: (<- (cv-out sel) X) routes X to the sel-th jack of the
+      // family. The selector wraps over the physical set in the lowerer.
+      sink = { t: 'jackscatter', jack, selector: expandNode(exprItems[0], env, ctx) };
+    } else {
+      const labels = rest.filter(it => it.t === 'kw').map(it => it.s);
+      sink = { t: 'jacksink', jack, labels };
+    }
+  } else if (sinkNode && sinkNode.t === 'sym') {
+    // Resolve sink: try env lookup; if not found it is a hardware sink sym.
+    const r = envLookup(env, sinkNode.s);
+    sink = r.found ? r.value : sinkNode;
+  } else if (sinkNode) {
+    sink = expandNode(sinkNode, env, ctx);
+  } else {
+    sink = { t: 'sym', s: '?' };
+  }
+
+  let value;
+  if (positional.length === 1) {
+    value = positional[0];
+  } else if (positional.length > 1) {
+    // Multi-positional cable: (<- buf (vcf :cut ...) (add ...) :per-sample)
+    // The first positional is a filter/processing chain; the second is the source.
+    // Model as a chain node.
+    value = { t: 'chain', stages: positional };
+  } else {
+    value = { t: 'num', v: 0 };
+  }
+
+  // Auto-inject :trig master when sink is a buffer (tape/audio/lens) and no rate kwarg is present.
+  // Audio delay buffers (t === 'audio') default to per-sample writes; tape/lens use the master clock.
+  // Mirrors CLK_OPS injection for primitive calls (expander.js line 480).
+  const sinkIsBuf = sink.t === 'tape' || sink.t === 'audio' || sink.t === 'lens';
+  if (sinkIsBuf && !kwargs.trig && !kwargs.hz && !kwargs.bpm && !('per-sample' in kwargs)) {
+    if (sink.t === 'audio') {
+      kwargs['per-sample'] = { t: 'flag' };
+    } else {
+      const masterR = envLookup(env, 'master');
+      if (masterR.found) kwargs.trig = masterR.value;
+    }
+  }
+
+  return { sink, value, kwargs };
+}
+
+// Load a file, parse it, and bind its top-level defs into env.
+// If collectCables is true, top-level (<- ...) forms are stored as raw AST in ctx.preludeCableForms.
+function loadAndBindFile(relpath, env, ctx, collectCables) {
+  const text = ctx.loadFile(relpath);
+  const forms = read(text);
+  processTopLevelForms(forms, env, ctx, collectCables);
+}
+
+// Process top-level forms: def, use, fn-def, patch are handled here.
+function processTopLevelForms(forms, env, ctx, collectCables) {
+  for (const form of forms) {
+    if (form.t !== 'list' || !form.items[0] || form.items[0].t !== 'sym') continue;
+    const head = form.items[0].s;
+
+    if (head === 'def') {
+      bindDef(form, env, ctx);
+    }
+
+    // SPEC: prelude top-level (<- SINK EXPR) are default cables; stored raw for
+    // deferred expansion in the patch's env.
+    if (collectCables && head === '<-') {
+      ctx.preludeCableForms.push(form);
+    }
+  }
+}
+
+function expand(astForms, { loadFile }) {
+  const report = {
+    cables: [],
+    unresolvedSyms: new Set(),
+    unknownOps: new Set(),
+  };
+  const ctx = { report, loadFile, localCables: [], preludeCableForms: [] };
+
+  // Build prelude env; collect top-level (<- ...) forms as default cables.
+  const rootEnv = makeEnv(null);
+  ctx.rootEnv = rootEnv;
+  try {
+    loadAndBindFile('prelude.loupe', rootEnv, ctx, true);
+  } catch (e) {
+    report.preludeError = e.message;
+  }
+
+  // Patch-level env extends prelude.
+  const patchEnv = makeEnv(rootEnv);
+
+  for (const form of astForms) {
+    if (form.t !== 'list' || !form.items[0] || form.items[0].t !== 'sym') continue;
+    const head = form.items[0].s;
+
+    if (head === 'use') {
+      const pathSym = form.items[1];
+      const relpath = 'patches/' + (pathSym && pathSym.s) + '.loupe';
+      try {
+        loadAndBindFile(relpath, patchEnv, ctx);
+      } catch (_e) {
+        report.unknownOps.add('use:' + (pathSym && pathSym.s));
+      }
+      continue;
+    }
+
+    if (head === 'def') {
+      // Top-level def outside patch (e.g. drum-kit.loupe has fn defs before (patch ...)).
+      bindDef(form, patchEnv, ctx);
+      continue;
+    }
+
+    if (head === 'patch' || head === 'computer-patch' || head === 'vst-patch' || head === 'midi-patch') {
+      expandPatchBody(form.items.slice(1), patchEnv, report, ctx);
+      continue;
+    }
+  }
+
+  // Flush cables emitted inside fn bodies (buffer writes, etc.) into the main
+  // cable list so the lowerer generates their recordhead slots.
+  for (const c of ctx.localCables) report.cables.push(c);
+
+  return report;
+}
+
+function expandPatchBody(bodyForms, env, report, ctx) {
+  const localEnv = makeEnv(env);
+  const claimedSinks = new Set();
+
+  for (const form of bodyForms) {
+    if (form.t !== 'list' || !form.items[0] || form.items[0].t !== 'sym') continue;
+    const head = form.items[0].s;
+
+    if (head === 'def') {
+      bindDef(form, localEnv, ctx);
+      continue;
+    }
+
+    if (head === '<-') {
+      const cable = expandCableForm(form, localEnv, ctx);
+      // Track the sink name so we can suppress prelude defaults for it.
+      const sinkName = cable.sink && cable.sink.t === 'sym' ? cable.sink.s : null;
+      if (sinkName) claimedSinks.add(sinkName);
+      report.cables.push(cable);
+      continue;
+    }
+  }
+
+  // Inject prelude default cables for sinks not claimed by the patch.
+  // SPEC: expanded in the patch's localEnv so (trig) resolves to the patch's master.
+  for (const form of ctx.preludeCableForms) {
+    const sinkSym = form.items[1];
+    const sinkName = sinkSym && sinkSym.t === 'sym' ? sinkSym.s : null;
+    if (sinkName && claimedSinks.has(sinkName)) continue;
+    const cable = expandCableForm(form, localEnv, ctx);
+    report.cables.push(cable);
+  }
+}
+
+module.exports = { expand };
+
+});
+__def("op-table.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+// op-table.js — single source of truth for op->kernel wiring.
+// Each row: { kernel?, inputs:[{kw,default,aliases?}], param0?:[{kw,shift,width,default?}] }
+// inputs in slot order (in0, in1, ...). param0 fields are STRUCTURAL numeric params only.
+
+// special, not table-driven:
+//   knob, cv-in, audio-in, pulse-in, switch   (hw leaf jacks; param0 = jack index)
+//   phasor, sine, triangle, saw, square        (oscillators; rate-mode bits in param0)
+//   wave                                       (wavetable + drumrack variant; composite lowering)
+//   snap, quantise, range, cv, v-oct           (mode-word or static-mask param0 shapes)
+//   detent                                     (variadic snap-points; param0 = point count)
+//   tap                                        (cross-slot wiring to paired recordhead head)
+//   recordhead_*                               (variant chosen by cable kwargs)
+//   morph                                      (variadic crossfade; param0 = input count)
+//   normal                                                       (jack normalisation; param0 = jack index)
+//   mix (variadic, >2 args)                    (chains to op_mix2 tree in lowerer)
+//   add, mul, or, and (variadic, >2 args)      (same chain treatment)
+//   feedback, z1                               (one-sample delay forms)
+//   thru                                       (buffer+index; in0 is a buffer ref)
+//   step, lookup, seek, wave_drumrack          (in0 is a buffer ref)
+//   onsets, gates, hits                        (in0 is a buffer ref)
+//   degree, pitch                              (in0=val, in1=buffer ref)
+//   op_terminal_write_*                        (output jacks / LEDs)
+
+const OP_TABLE = {
+
+  // ---- binary arithmetic -------------------------------------------------
+  add:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  sub:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  mul:       { inputs: [{kw:'a',default:0}, {kw:'gain',default:0}] },
+  div:       { inputs: [{kw:'a',default:0}, {kw:'n',default:1}] },
+  mod:       { inputs: [{kw:'a',default:0}, {kw:'n',default:1}] },
+  spread:    { inputs: [{kw:'in',default:0}, {kw:'n',default:1}] },
+  gt:        { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  gte:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  lt:        { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  lte:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  eq:        { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  ne:        { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  not:       { inputs: [{kw:'x',default:0}] },
+  max:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  min:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  abs:       { inputs: [{kw:'x',default:0}] },
+  rect:      { inputs: [{kw:'x',default:0}] },
+  and:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  or:        { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  xor:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+  transpose: { inputs: [{kw:'in',default:0}, {kw:'by',default:0}] },
+  invert:    { inputs: [{kw:'in',default:0}] },
+  shift:     { inputs: [{kw:'in',default:0}, {kw:'by',default:0}] },
+  mask:      { inputs: [{kw:'in',default:0}, {kw:'mask',default:4095}] },
+  bit:       { inputs: [{kw:'in',default:0}, {kw:'n',default:0}] },
+
+  // op_if: 3 inputs (in0=cond, in1=then, in2=else)
+  if:        { inputs: [{kw:'cond',default:0}, {kw:'then',default:0}, {kw:'else',default:0}] },
+
+  // op_window: 3 inputs (in0=a, in1=lo, in2=hi)
+  window:    { inputs: [{kw:'a',default:0}, {kw:'lo',default:0}, {kw:'hi',default:4095}] },
+
+  // op_vca, op_ring: scale_depth(in0, in1)
+  vca:       { inputs: [{kw:'in',default:0}, {kw:'amp',default:4095}] },
+  ring:      { inputs: [{kw:'in',default:0}, {kw:'amp',default:4095}] },
+
+  // op_mix2: binary mix (average)
+  mix2:      { kernel: 'op_mix2', inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
+
+  // ---- edge detectors / signal state ------------------------------------
+  // op_edge: in0=signal, param0=width (optional, 0=default kTickWidth)
+  edge:      { inputs: [{kw:'in',default:0}],
+               param0: [{kw:'width',shift:0,width:32,default:0}] },
+
+  // trig: kernel override to op_fall (detects the phasor ramp's falling edge = downbeat)
+  // in0=signal, param0=width
+  trig:      { kernel: 'op_fall',
+               inputs: [{kw:'trig',default:0}],
+               param0: [{kw:'width',shift:0,width:32,default:0}] },
+
+  // op_fall: same as trig but named directly
+  fall:      { inputs: [{kw:'x',default:0}],
+               param0: [{kw:'width',shift:0,width:32,default:0}] },
+
+  // op_diff: in0=signal
+  diff:      { inputs: [{kw:'in',default:0}] },
+
+  // op_toggle: in0=signal
+  toggle:    { inputs: [{kw:'in',default:0}] },
+
+  // op_hold: in0=val, in1=gate
+  hold:      { inputs: [{kw:'val',default:0}, {kw:'on',default:0}] },
+
+  // op_gate: in0=signal, param0=len (0=kTickWidth)
+  gate:      { inputs: [{kw:'in',default:0}],
+               param0: [{kw:'len',shift:0,width:32,default:0}] },
+
+  // op_schmitt: in0=sig, in1=lo, in2=hi
+  schmitt:   { inputs: [{kw:'in',default:0}, {kw:'lo',default:1952}, {kw:'hi',default:2144}] },
+
+  // op_z1: in0=x (one-sample delay)
+  z1:        { inputs: [{kw:'x',default:0}] },
+
+  // ---- filters / audio shaping ------------------------------------------
+  // one-pole: in0=signal, in1=coefficient
+  lpf:       { inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}] },
+  hpf:       { inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}] },
+  average:   { inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}] },
+  slew:      { inputs: [{kw:'in',default:0}, {kw:'rate',default:2048}] },
+  lpg:       { inputs: [{kw:'in',default:0}, {kw:'ctrl',default:2048}] },
+  envfollow: { inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}] },
+
+  // op_vcf: in0=sig, in1=cut, in2=res, param0=port (0=lp 1=hp 2=bp 3=notch)
+  vcf:       { inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}, {kw:'res',default:2048}],
+               param0: [{kw:'port',shift:0,width:2,default:0}] },
+
+  // op_wavefold: in0=sig, in1=drive
+  wavefold:  { inputs: [{kw:'in',default:0}, {kw:'drive',default:0}] },
+
+  // op_crush: in0=sig, in1=rate (higher=less crushing)
+  crush:     { inputs: [{kw:'in',default:0}, {kw:'rate',default:4095}] },
+
+  // op_saturate: in0=sig, in1=drive, in2=bias (bipolar), in3=mix, in4=level
+  saturate:  { inputs: [{kw:'in',default:0}, {kw:'drive',default:0}, {kw:'bias',default:0},
+                        {kw:'mix',default:4095}, {kw:'level',default:4095}] },
+
+  // ---- clocked generators -----------------------------------------------
+  // op_random: in0=clk  (C reads s->in0 as clk)
+  random:    { inputs: [{kw:'trig',default:0}] },
+
+  // op_chance: in0=p, in1=clk
+  chance:    { inputs: [{kw:'p',default:2048}, {kw:'trig',default:0}] },
+
+  // op_walk: in0=clk, param0=step (0 -> 128 in kernel)
+  walk:      { inputs: [{kw:'trig',default:0}],
+               param0: [{kw:'step',shift:0,width:32,default:128}] },
+
+  // ---- clock / rhythm ---------------------------------------------------
+  // op_every: in0=N, in1=clk, param0=width
+  every:     { inputs: [{kw:'n',default:1}, {kw:'trig',default:0}],
+               param0: [{kw:'width',shift:0,width:32,default:0}] },
+
+  // op_euclid: in0=pulses, in1=steps, in2=clk, param0=width
+  euclid:    { inputs: [{kw:'pulses',default:0}, {kw:'steps',default:1}, {kw:'trig',default:0}],
+               param0: [{kw:'width',shift:0,width:32,default:0}] },
+
+  // op_turns: in0=clk
+  turns:     { inputs: [{kw:'trig',default:0}] },
+
+  // op_counter: in0=bars, in1=clk
+  counter:   { inputs: [{kw:'bars',default:1}, {kw:'trig',default:0}] },
+
+  // ---- voice kernels ----------------------------------------------------
+  // op_envelope: in0=trig, in1=decay, param0=peak (0=VMAX in kernel)
+  envelope:  { inputs: [{kw:'trig',default:0}, {kw:'decay',default:2048}],
+               param0: [{kw:'peak',shift:0,width:32,default:0}] },
+
+  // op_follow: in0=base_ramp, in1=drift, param0=mult(low16)|div(high16)
+  follow:    { inputs: [{kw:'base',default:0}, {kw:'drift',default:0}],
+               param0: [{kw:'mult',shift:0,width:16,default:1},{kw:'div',shift:16,width:16,default:1}] },
+
+  // ---- drum voices (all 5 inputs, in position order) --------------------
+  // op_kick: in0=trig, in1=note, in2=decay, in3=drive, in4=sweep
+  kick:      { inputs: [
+                 {kw:'trig',default:0,aliases:['on']},
+                 {kw:'note',default:24,aliases:['midi']},
+                 {kw:'decay',default:2048},
+                 {kw:'drive',default:0},
+                 {kw:'sweep',default:0},
+               ] },
+
+  // op_snare: in0=trig, in1=note, in2=decay, in3=snappy, in4=tone; param0=seed
+  snare:     { inputs: [
+                 {kw:'trig',default:0,aliases:['on']},
+                 {kw:'note',default:45,aliases:['midi']},
+                 {kw:'decay',default:2048},
+                 {kw:'snappy',default:2048},
+                 {kw:'tone',default:2048},
+               ],
+               param0: [{kw:'seed',shift:0,width:32,default:0}] },
+
+  // op_hat: in0=trig, in1=note, in2=decay, in3=tone
+  hat:       { inputs: [
+                 {kw:'trig',default:0,aliases:['on']},
+                 {kw:'note',default:81,aliases:['midi']},
+                 {kw:'decay',default:1200},
+                 {kw:'tone',default:2600},
+               ] },
+
+};
+
+module.exports = { OP_TABLE };
+
+});
+__def("lowerer.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+
+// Lowerer: expanded AST -> IR graph.
+// General path: OP_TABLE. Special handlers only for ops that need composite lowering.
+
+const { OP_TABLE } = require('./op-table.js');
+
+// Hardware input jacks in C hw_scratch order (runtime.c runtime_update_hw_scratch).
+// THE single definition of jack -> index; test-jack-index.js gates it against C.
+const HW_JACKS = [
+  'audio-in-1', 'audio-in-2', 'pulse-in-1', 'pulse-in-2',
+  'cv-in-1', 'cv-in-2', 'knob-main', 'knob-x', 'knob-y', 'switch-z',
+];
+const JACK_INDEX = Object.fromEntries(HW_JACKS.map((j, i) => [j, i]));
+
+// Terminal sink names -> kernel name suffix.
+const TERMINAL_SINKS = new Set([
+  'audio-out-1', 'audio-out-2',
+  'cv-out-1', 'cv-out-2',
+  'pulse-out-1', 'pulse-out-2',
+  'led-0', 'led-1', 'led-2', 'led-3', 'led-4', 'led-5',
+]);
+
+// Map a frequency in Hz to the nearest rate_table code (RATE mode, mode 2).
+// rate_table is log-spaced 0.05 Hz .. 20 kHz over 256 entries (see
+// runtime/rate_table.h); the runtime indexes it with (code >> 4) & 0xFF, so
+// the code is index << 4. Used to represent sub-1 Hz oscillator rates, which
+// the integer HZ domain (mode 1) rounds to 0.
+function hzToRateCode(hz) {
+  const lo = 0.05, hi = 20000, n = 256;
+  let best = 0, bestErr = Infinity;
+  for (let b = 0; b < n; b++) {
+    const freq = lo * Math.pow(hi / lo, b / (n - 1));
+    const err = Math.abs(freq - hz);
+    if (err < bestErr) { bestErr = err; best = b; }
+  }
+  return best << 4;
+}
+
+// Choose recordhead kernel based on cable kwargs.
+function recordheadKernel(kwargs) {
+  const perSample = 'per-sample' in kwargs;
+  const hasWhen = 'when' in kwargs;
+  const hasLen = 'len' in kwargs;
+  if (perSample) return 'op_recordhead_per_sample';
+  if (hasLen && hasWhen) return 'op_recordhead_len_capped_gated';
+  if (hasLen) return 'op_recordhead_len_capped';
+  if (hasWhen) return 'op_recordhead_gated';
+  return 'op_recordhead_per_cell';
+}
+
+function opToKernel(op) {
+  return 'op_' + op.replace(/-/g, '_');
+}
+
+function chooseKernel(op, kwargs) {
+  if (op === 'wave' && 'slots' in kwargs) return 'op_wave_drumrack';
+  if (op === 'wave') return 'op_wave';
+  // trig = phasor ramp's falling edge = downbeat (op_fall).
+  if (op === 'trig') return 'op_fall';
+  return opToKernel(op);
+}
+
+function lower(expanded) {
+  let nextSlotId = 0;
+  let nextBufId = 0;
+
+  const slots = [];
+  const buffers = [];
+  const terminals = [];
+
+  // Memoisation: AST node object (by identity) -> lowered Ref.
+  const memo = new Map();
+
+  // Buffer allocation: AST node object -> buffer entry.
+  const bufMemo = new Map();
+
+  function allocSlot(kernel, ins, params, meta) {
+    const id = nextSlotId++;
+    const slot = {
+      id,
+      kernel,
+      in: ins,
+      out: { slotId: id, field: 'value' },
+      params: params || {},
+      meta: meta || {},
+    };
+    slots.push(slot);
+    return { kind: 'slot', id };
+  }
+
+  function allocBuffer(kind, length, seed) {
+    const id = nextBufId++;
+    const entry = { id, kind, length };
+    if (seed !== undefined) entry.seed = seed;
+    buffers.push(entry);
+    return { kind: 'buffer', id };
+  }
+
+  function lowerNode(node) {
+    if (!node) return { kind: 'const', value: 0 };
+
+    if (node.t === 'num') return { kind: 'const', value: node.v };
+    if (node.t === 'flag') return { kind: 'const', value: 4095 };
+    if (node.t === 'kw') return { kind: 'const', value: 0 };
+
+    if (memo.has(node)) return memo.get(node);
+
+    const ref = lowerNodeInner(node);
+    memo.set(node, ref);
+    return ref;
+  }
+
+  function lowerNodeInner(node) {
+    switch (node.t) {
+      case 'call':    return lowerCall(node);
+      case 'lens':    return lowerLens(node);
+      case 'opthru':  return lowerOpThru(node);
+      // An op-lens selected but never applied: its value is the picked index.
+      case 'oplens-sel': {
+        const results = node.cells.map((_, k) => ({ t: 'num', v: k }));
+        return lowerOpThru({ results, at: node.at, clamp: node.clamp });
+      }
+      case 'tape':    return lowerTape(node);
+      case 'audio':   return lowerAudio(node);
+      case 'connected': return lowerConnected(node);
+      case 'z1':      return lowerZ1(node);
+      // feedback is a no-op pass-through.
+      case 'feedback': return lowerNode(node.args && node.args[0] ? node.args[0] : { t: 'num', v: 0 });
+      case 'morph':   return lowerMorph(node);
+      case 'outputs': return lowerOutputsNode(node);
+      // chain: stages are piped; last stage's output is the result.
+      case 'chain':   return lowerChain(node);
+      // oplens used outside thru is not a runtime value; emit zero.
+      case 'oplens':  return { kind: 'const', value: 0 };
+      case 'ref':     return { kind: 'const', value: 0 }; // fallback; shouldn't be hit
+      case 'sym':
+        throw new Error(`unknown name: ${node.s}`);
+      default:
+        return { kind: 'const', value: 0 };
+    }
+  }
+
+
+  // Valid labels per jack family (the uniform call-form surface).
+  const JACK_LABELS = {
+    'cv-in':    ['1', '2'],   'audio-in': ['1', '2'], 'pulse-in': ['1', '2'],
+    'cv-out':   ['1', '2'],   'audio-out':['1', '2'], 'pulse-out':['1', '2'],
+    'knob':     ['main', 'x', 'y'],
+    'switch':   ['z'],
+    'led':      ['0', '1', '2', '3', '4', '5'],
+  };
+
+  // Interpretation flags that are not jack labels.
+  const INTERP_FLAGS = new Set(['bipolar', 'v-oct', 'detent']);
+
+  function jackLabel(family, kwargs) {
+    const valid = JACK_LABELS[family];
+    const labelKeys = Object.keys(kwargs).filter(
+      k => kwargs[k].t === 'flag' && !INTERP_FLAGS.has(k));
+    const label = labelKeys.length ? labelKeys[0] : undefined;
+    if (label === undefined || !valid.includes(label)) {
+      const list = valid.map(l => `${family} :${l}`).join(' and ');
+      throw new Error(`(${family} :${label ?? '?'}): no such jack; this module has ${list}`);
+    }
+    return label;
+  }
+
+  // General table-driven lowering. param0 built from numeric kwargs only.
+  // Input priority: positional args[i], then named kwarg, then aliases, then default.
+  // Positional wins over kwargs so expander-injected :trig defaults don't displace
+  // explicit positional streams (e.g. (trig (follow ...)) keeps follow as in0).
+  function lowerTableOp(name, row, args, kwargs) {
+    let kernel = row.kernel ?? ('op_' + name.replace(/-/g, '_'));
+    // :sat selects the saturating variant (clamps at the value rails, not wrap).
+    if ((name === 'add' || name === 'sub') && kwargs.sat && kwargs.sat.t === 'flag') {
+      kernel = 'op_' + name + '_sat';
+    }
+    const ins = row.inputs.map((spec, i) => {
+      let val = args[i];
+      if (val === undefined) val = kwargs[spec.kw];
+      if (val === undefined && spec.aliases) {
+        for (const a of spec.aliases) { if (kwargs[a] !== undefined) { val = kwargs[a]; break; } }
+      }
+      if (val === undefined) return { kind: 'const', value: spec.default ?? 0 };
+      return lowerNode(val);
+    });
+    let p0 = 0;
+    if (row.param0) {
+      for (const f of row.param0) {
+        const kwVal = kwargs[f.kw];
+        const v = (kwVal && kwVal.t === 'num') ? kwVal.v : (f.default ?? 0);
+        const mask = f.width === 32 ? 0xFFFFFFFF : (1 << f.width) - 1;
+        p0 = (p0 | ((v & mask) << f.shift)) >>> 0;
+      }
+    }
+    return allocSlot(kernel, ins, { param0: p0 });
+  }
+
+  function lowerCall(node) {
+    const { op } = node;
+    let { args, kwargs } = node;
+
+    // `:in` is an alias for the first positional signal; normalise here so
+    // per-op cases and the table handler both see it as args[0].
+    if (kwargs.in && kwargs.in.t !== 'flag') {
+      args = [kwargs.in, ...args];
+      kwargs = { ...kwargs };
+      delete kwargs.in;
+    }
+
+    // (len tape): a buffer's length is fixed at compile time, so fold it to a
+    // constant. (The expander already folds len of a lens/quote; tapes and audio
+    // buffers reach here, where their allocated length is known.)
+    if (op === 'len' && args.length === 1) {
+      const ref = lowerNode(args[0]);
+      if (ref.kind === 'buffer') {
+        const buf = buffers.find(b => b.id === ref.id);
+        if (buf) return { kind: 'const', value: buf.length };
+      }
+    }
+
+    // Reading an output jack in value position is a direction error.
+    if (op === 'cv-out' || op === 'audio-out' || op === 'pulse-out' || op === 'led') {
+      const label = jackLabel(op, kwargs);
+      throw new Error(`${op} :${label} is an output, cannot read it`);
+    }
+
+    /* Encode hw jack index for leaf kernels into param0 so C runtime can route hw inputs. */
+    if (op === 'knob') {
+      const label = jackLabel('knob', kwargs);              // main / x / y
+      const jackIdx = JACK_INDEX['knob-' + label];
+      const knobRef = allocSlot('op_knob', [], { param0: jackIdx }, { state: [] });
+      // A bare knob is continuous (like a raw voltage). :detent opts into snapping
+      // the rails (0 / vmid / vmax) past ADC jitter; :detent 0 is the same as omitting it.
+      const detentOn = 'detent' in kwargs && !(kwargs.detent.t === 'num' && kwargs.detent.v === 0);
+      if (!detentOn) return knobRef;
+      const vmin = { kind: 'const', value: 0 };
+      const vmid = { kind: 'const', value: 2048 };
+      const vmax = { kind: 'const', value: 4095 };
+      return allocSlot('op_detent', [knobRef, vmin, vmid, vmax], { param0: 3 }, { state: [] });
+    }
+    if (op === 'cv-in' || op === 'audio-in' || op === 'pulse-in') {
+      const label = jackLabel(op, kwargs);                  // 1 / 2
+      const jackIdx = JACK_INDEX[`${op}-${label}`];
+      const kernel = 'op_' + op.replace(/-/g, '_');
+      const leafRef = allocSlot(kernel, [], { param0: jackIdx }, { state: [] });
+      // cv-in :bipolar centres on 0 by subtracting vmid.
+      if (op === 'cv-in' && 'bipolar' in kwargs) {
+        return allocSlot('op_sub', [leafRef, { kind: 'const', value: 2048 }], {}, { state: [] });
+      }
+      return leafRef;
+    }
+    // (switch :z): hardware z-switch. op_switch returns raw 0/1/2; map that to
+    // the three rails (vmin/vmid/vmax) by picking through a const lens, dogfooding
+    // the data-lens op_thru with a dynamic index. `switch` is the panel input only;
+    // value selection by index is `pick` (below).
+    if (op === 'switch' && args.length === 0
+        && Object.keys(kwargs).some(k => kwargs[k].t === 'flag' && k === 'z')) {
+      jackLabel('switch', kwargs);                          // validates :z
+      const posRef = allocSlot('op_switch', [], { param0: JACK_INDEX['switch-z'] }, { state: [] });
+      const railsRef = allocBuffer('lens', 3, [0, 2048, 4095]);
+      return allocSlot('op_thru', [railsRef, posRef], {}, { state: [] });
+    }
+    if (op === 'switch') {
+      throw new Error('switch is the panel input ((switch :z)); to select a value use (thru (lens a b ...) idx) or (if cond a b)');
+    }
+    // detent: in[0] = x, in[1..] = snap points; param0 = point count.
+    if (op === 'detent') {
+      const ins = args.map(lowerNode);
+      const npts = ins.length > 0 ? ins.length - 1 : 0;
+      return allocSlot('op_detent', ins.slice(0, 5), { param0: npts }, { state: [] });
+    }
+    // snap: fold a static scale into a 12-bit pitch-class mask in param0.
+    if (op === 'snap') {
+      const noteRef = args[0] ? lowerNode(args[0]) : { kind: 'const', value: 0 };
+      const scaleNode = kwargs.scale !== undefined ? kwargs.scale : args[1];
+      let mask = 0;
+      if (scaleNode && scaleNode.t === 'num') {
+        mask = scaleNode.v & 0xFFF;
+      } else if (scaleNode && Array.isArray(scaleNode.items)) {
+        for (const item of scaleNode.items) {
+          if (item.t === 'num') mask |= 1 << (((item.v % 12) + 12) % 12);
+        }
+      }
+      if (mask) return allocSlot('op_snap', [noteRef], { param0: mask }, { state: [] });
+      // mask 0 (dynamic or empty scale): fall through to generic path.
+    }
+    // (mix a b ... :levels '(w0 w1 ...)): weighted mix, normalised to the weight
+    // sum so the output stays bounded. Expands to a sum of vca'd inputs; no kernel.
+    if (op === 'mix' && kwargs.levels &&
+        (kwargs.levels.t === 'quote' || kwargs.levels.t === 'list')) {
+      const inputs = args.map(lowerNode);
+      const ws = kwargs.levels.items.map(it => (it.t === 'num' ? it.v : 0));
+      if (ws.length !== inputs.length) {
+        throw new Error(`(mix ... :levels): ${ws.length} levels for ${inputs.length} inputs`);
+      }
+      const sum = ws.reduce((a, b) => a + b, 0) || 1;
+      const scaled = inputs.map((ref, i) =>
+        allocSlot('op_vca', [ref, { kind: 'const', value: Math.round(ws[i] * 4095 / sum) }], {}, {}));
+      if (scaled.length === 1) return scaled[0];
+      return allocSlot('op_add', scaled, {}, {}); // post-pass folds >2 into an add2 tree
+    }
+    // Variadic ops that chain into binary pairs.
+    if (op === 'mix' || op === 'add' || op === 'mul' || op === 'or' || op === 'and') {
+      const positionalInputs = args.map(lowerNode);
+      if (positionalInputs.length > 2) {
+        return lowerVariadic(op, positionalInputs, kwargs);
+      }
+    }
+
+    // Table-driven general path: covers all OP_TABLE ops not already handled above.
+    if (OP_TABLE[op]) {
+      return lowerTableOp(op, OP_TABLE[op], args, kwargs);
+    }
+
+    const kernel = chooseKernel(op, kwargs);
+    const ins = args.map(lowerNode);
+
+    // range: one structural mode word in param0.
+    if (op === 'range') {
+      const xRef = args[0] !== undefined ? lowerNode(args[0]) : { kind: 'const', value: 0 };
+      let param0 = 0;
+      const tv = kwargs['to-value'], ti = kwargs['to-index'];
+      if (tv && tv.t === 'num')      param0 = ((tv.v & 0x3FFFFFFF) | 0x40000000) >>> 0;
+      else if (ti && ti.t === 'num') param0 = (ti.v & 0x3FFFFFFF) >>> 0;
+      return allocSlot('op_range', [xRef], { param0 }, {});
+    }
+
+    // tap: C reads in0=buf, in1=amount, in2=cur_head, param0 bit0 = :span flag.
+    // in2 is a placeholder filled by the post-pass with the paired recordhead head.
+    if (op === 'tap') {
+      const bufRef    = args[0] !== undefined ? lowerNode(args[0]) : { kind: 'const', value: 0 };
+      const amountArg = kwargs.amount !== undefined ? kwargs.amount : args[1];
+      const amountRef = amountArg !== undefined ? lowerNode(amountArg) : { kind: 'const', value: 0 };
+      const spanFlag  = (kwargs.span && kwargs.span.t === 'flag') ? 1 : 0;
+      return allocSlot('op_tap', [bufRef, amountRef, { kind: 'const', value: 0 }], { param0: spanFlag }, {});
+    }
+
+    // wave (wavetable / grain reader): composites a phasor + op_wave from pitch kwargs.
+    if (op === 'wave' && !('slots' in kwargs)) {
+      const bufRef = args[0] !== undefined ? lowerNode(args[0]) : { kind: 'const', value: 0 };
+      const PITCH = { midi: 0, note: 0, hz: 1, rate: 2 };
+      const pk = ['midi', 'note', 'hz', 'rate'].find(k => k in kwargs);
+      let scanRef;
+      if (pk) {
+        const mode = PITCH[pk] & 3;
+        const rateRef = lowerNode(kwargs[pk]);
+        const onceRef = kwargs.once ? lowerNode(kwargs.once) : null;
+        const base = mode | (onceRef ? 4 : 0);
+        const pins = onceRef ? [rateRef, onceRef] : [rateRef];
+        let phaseRef = allocSlot('op_phasor', pins, { param0: base }, {}); // :phase ramp
+        if (kwargs.len) phaseRef = allocSlot('op_vca', [phaseRef, lowerNode(kwargs.len)], {}, {});
+        if (kwargs.pos) phaseRef = allocSlot('op_add', [phaseRef, lowerNode(kwargs.pos)], {}, {});
+        scanRef = phaseRef;
+      } else {
+        scanRef = kwargs.pos ? lowerNode(kwargs.pos) : { kind: 'const', value: 0 };
+      }
+      return allocSlot('op_wave', [bufRef, scanRef], {}, {});
+    }
+
+    // thru (data-lens decode): C reads in0=lens buffer, index from in1 (always).
+    if (op === 'thru') {
+      const lensRef = kwargs.lens ? lowerNode(kwargs.lens)
+                    : (args[0] !== undefined ? lowerNode(args[0]) : { kind: 'const', value: 0 });
+      const atArg = kwargs.at !== undefined ? kwargs.at : args[1];
+      const atRef = (atArg !== undefined && atArg.t === 'num')
+                  ? { kind: 'const', value: atArg.v & 0xFFF }
+                  : (atArg !== undefined ? lowerNode(atArg) : { kind: 'const', value: 0 });
+      return allocSlot('op_thru', [lensRef, atRef], {}, {});
+    }
+
+    // Oscillators + clock: detect rate kwargs and bake mode bits into param0 low 2 bits.
+    // Rate modes: 0=NOTE, 1=HZ, 2=RATE, 3=TEMPO.  in0 carries the rate value.
+    const OSC_OPS = new Set(['phasor', 'sine', 'triangle', 'saw', 'square']);
+    if (OSC_OPS.has(op)) {
+      /* :midi is the same as :note for rate-mode purposes (both NOTE-domain). */
+      const RATE_KWARGS = ['note', 'midi', 'hz', 'rate', 'tempo', 'bpm'];
+      const found = RATE_KWARGS.filter(k => k in kwargs);
+      if (found.length > 1) throw new Error(`ambiguous rate kwargs: ${found.join(', ')}`);
+
+      let mode = 0;      // default NOTE
+      const oscPositional = args.map(lowerNode);
+      let rateRef = (oscPositional.length >= 1)
+        ? oscPositional[0]
+        : { kind: 'const', value: 69 };
+
+      if (found.length === 1) {
+        const kw = found[0];
+        const val = kwargs[kw];
+        if (kw === 'note' || kw === 'midi') {
+          mode = 0;
+          rateRef = lowerNode(val);
+        } else if (kw === 'hz') {
+          if (val.t === 'num' && !(Number.isInteger(val.v) && val.v >= 1)) {
+            mode = 2;
+            rateRef = { kind: 'const', value: hzToRateCode(val.v) };
+          } else {
+            mode = 1;
+            rateRef = lowerNode(val);
+          }
+        } else if (kw === 'rate') {
+          mode = 2;
+          rateRef = lowerNode(val);
+        } else if (kw === 'tempo') {
+          mode = 3;
+          rateRef = lowerNode(val);
+        } else if (kw === 'bpm') {
+          if (val.t === 'num') {
+            const hz = val.v / 60;
+            if (Number.isInteger(hz) && hz >= 1) {
+              mode = 1;
+              rateRef = { kind: 'const', value: hz };
+            } else {
+              mode = 2;
+              rateRef = { kind: 'const', value: hzToRateCode(hz) };
+            }
+          } else {
+            mode = 1;
+            const bpmRef = lowerNode(val);
+            const sixtyRef = { kind: 'const', value: 60 };
+            rateRef = allocSlot('op_div', [bpmRef, sixtyRef], {}, {});
+          }
+        }
+      }
+
+      // :phase drives the shaper from an external phase (e.g. a phasor ramp) instead of
+      // the internal accumulator (param0 bit 4). The rate/pitch is then ignored.
+      const phaseRef = kwargs.phase ? lowerNode(kwargs.phase) : null;
+
+      if (op === 'sine') {
+        // sine: param0 encodes mode (bits 1..0), PM present (bit 2), depth present (bit 3),
+        // phase-driven (bit 4).
+        const pmRef    = kwargs.pm    ? lowerNode(kwargs.pm)    : null;
+        const depthRef = kwargs.depth ? lowerNode(kwargs.depth) : null;
+        let param0 = mode & 3;
+        if (phaseRef) param0 |= 16;
+        if (pmRef)    param0 |= 4;
+        if (depthRef) param0 |= 8;
+        const sineIns = [phaseRef || rateRef];
+        if (pmRef)    sineIns.push(pmRef);
+        if (depthRef) { if (!pmRef) sineIns.push({ kind: 'const', value: 0 }); sineIns.push(depthRef); }
+        return allocSlot(kernel, sineIns.slice(0, 5), { param0 }, {});
+      }
+
+      // phasor outputs its ramp (the phase). :sync locks to an external pulse.
+      if (op === 'phasor') {
+        const syncRef = kwargs.sync ? lowerNode(kwargs.sync) : null;
+        const lock = syncRef && found.length === 0 && args.length === 0;
+        const base = (mode & 3) | (syncRef ? 4 : 0) | (lock ? 8 : 0);
+        const pIns = syncRef ? [rateRef, syncRef] : [rateRef];
+        return allocSlot('op_phasor', pIns, { param0: base }, {});
+      }
+
+      // triangle/saw/square: param0 low 2 bits = mode; in0 = rate value. With :phase,
+      // in0 is an external phase (bit 4 set) and the rate is ignored.
+      return allocSlot(kernel, [phaseRef || rateRef], { param0: phaseRef ? 16 : (mode & 3) }, {});
+    }
+
+    // Generic fallback for ops not in OP_TABLE and not handled above.
+    // Numeric kwargs fold into param0 (sorted by key); dynamic kwargs become extra inputs.
+    const params = {};
+    const extraIns = [];
+
+    for (const [k, v] of Object.entries(kwargs)) {
+      if (k === 'port') continue;
+      if (v.t === 'flag') {
+        // Flags go into meta.
+      } else if (v.t === 'num') {
+        params[k] = v.v;
+      } else {
+        extraIns.push({ key: k, ref: lowerNode(v) });
+      }
+    }
+
+    // trig inputs lead so clock-consumers find their clock first.
+    const orderedExtras = [
+      ...extraIns.filter(e => e.key === 'trig'),
+      ...extraIns.filter(e => e.key !== 'trig'),
+    ];
+
+    const allIns = [
+      ...ins,
+      ...orderedExtras.map(e => e.ref),
+    ].slice(0, 5);
+
+    const flags = Object.entries(kwargs)
+      .filter(([, v]) => v.t === 'flag')
+      .map(([k]) => k);
+
+    const meta = {};
+    if (flags.length) meta.flags = flags;
+
+    return allocSlot(kernel, allIns, params, meta);
+  }
+
+  function lowerVariadic(op, inputRefs, kwargs) {
+    // Chain into binary pairs left-to-right.
+    // (mix a b c d) -> mix2(mix2(a,b), mix2(c,d))
+    const kernel = opToKernel(op) + '2';
+    let refs = inputRefs;
+    while (refs.length > 2) {
+      const next = [];
+      for (let i = 0; i < refs.length; i += 2) {
+        if (i + 1 < refs.length) {
+          const pairParams = {};
+          for (const [k, v] of Object.entries(kwargs)) {
+            if (v.t === 'num') pairParams[k] = v.v;
+          }
+          const flags = Object.entries(kwargs).filter(([, v]) => v.t === 'flag').map(([k]) => k);
+          const meta = flags.length ? { flags } : {};
+          next.push(allocSlot(kernel, [refs[i], refs[i + 1]], pairParams, meta));
+        } else {
+          next.push(refs[i]); // odd one out passes through
+        }
+      }
+      refs = next;
+    }
+    // Final pair.
+    const pairParams = {};
+    for (const [k, v] of Object.entries(kwargs)) {
+      if (v.t === 'num') pairParams[k] = v.v;
+    }
+    const flags = Object.entries(kwargs).filter(([, v]) => v.t === 'flag').map(([k]) => k);
+    const meta = flags.length ? { flags } : {};
+    return allocSlot(kernel, refs.slice(0, 2), pairParams, meta);
+  }
+
+  function lowerLens(node) {
+    if (bufMemo.has(node)) return bufMemo.get(node);
+    const seed = node.items.map(item => {
+      if (item.t === 'num') return item.v;
+      return 0;
+    });
+    const ref = allocBuffer('lens', seed.length, seed);
+    bufMemo.set(node, ref);
+    return ref;
+  }
+
+  // Lower a {t:'opthru', results:[node0..nodeK-1], at:atNode, clamp:bool}.
+  function lowerOpThru(node) {
+    const { results, at } = node;
+    const K = results.length;
+    const cellRefs = results.map(r => lowerNode(r));
+    const rawAtRef = lowerNode(at);
+
+    if (K === 0) return { kind: 'const', value: 0 };
+    if (K === 1) return cellRefs[0];
+
+    let atRef;
+    if (node.clamp) {
+      atRef = rawAtRef;
+    } else {
+      // Floored modulo: ((rawAt % K) + K) % K
+      const kRef  = { kind: 'const', value: K };
+      const mod1  = allocSlot('op_mod', [rawAtRef, kRef], {}, { state: [] });
+      const addK  = allocSlot('op_add', [mod1, kRef], {}, { state: [] });
+      atRef       = allocSlot('op_mod', [addK, kRef], {}, { state: [] });
+    }
+
+    function pick(refs, lo, hi) {
+      if (hi - lo === 1) return refs[lo];
+      const mid = (lo + hi) >> 1;
+      const midRef = { kind: 'const', value: mid };
+      const condRef = allocSlot('op_lt', [atRef, midRef], {}, { state: [] });
+      const leftRef  = pick(refs, lo, mid);
+      const rightRef = pick(refs, mid, hi);
+      return allocSlot('op_if', [condRef, leftRef, rightRef], {}, { state: [] });
+    }
+
+    return pick(cellRefs, 0, K);
+  }
+
+  function lowerTape(node) {
+    if (bufMemo.has(node)) return bufMemo.get(node);
+    const seed = node.items.map(item => {
+      if (item.t === 'num') return item.v;
+      // _ and ~ are score rest/hold markers; they lower to 0.
+      if (item.t === 'sym' && (item.s === '_' || item.s === '~')) return 0;
+      if (item.t === 'sym') throw new Error(`unknown name: ${item.s}`);
+      return 0;
+    });
+    const ref = allocBuffer('tape', seed.length, seed);
+    bufMemo.set(node, ref);
+    return ref;
+  }
+
+  function lowerAudio(node) {
+    if (bufMemo.has(node)) return bufMemo.get(node);
+    let seconds = 1;
+    if (node.seconds && node.seconds.t === 'num') seconds = node.seconds.v;
+    else if (node.length && node.length.t === 'num') seconds = node.length.v / 48000;
+    const length = Math.round(seconds * 48000);
+    const ref = allocBuffer('audio', length);
+    bufMemo.set(node, ref);
+    return ref;
+  }
+
+  // Resolve a jack expression (e.g. (pulse-in :1)) to its hw jack index.
+  function jackIndexOf(j) {
+    if (!j) return 0;
+    if (j.t === 'call') {
+      const n = j.args && j.args[0] && j.args[0].t === 'num' ? j.args[0].v : 1;
+      return JACK_INDEX[j.op + '-' + n] ?? 0;
+    }
+    if (j.t === 'sym') return JACK_INDEX[j.s] ?? 0;
+    return 0;
+  }
+
+  // (connected JACK): reads only the connection mask (param0 = jack index), no inputs.
+  function lowerConnected(node) {
+    return allocSlot('op_connected', [], { param0: jackIndexOf(node.jack) }, {});
+  }
+
+  function lowerZ1(node) {
+    const inRef = lowerNode(node.x);
+    return allocSlot('op_z1', [inRef], {}, { state: ['last'] });
+  }
+
+  function lowerMorph(node) {
+    const ins = (node.args || []).map(lowerNode).slice(0, 5);
+    return allocSlot('op_morph', ins, {}, {});
+  }
+
+  function lowerOutputsNode(node) {
+    if (node.ports && node.ports.length > 0) {
+      return lowerNode(node.ports[0].value);
+    }
+    return { kind: 'const', value: 0 };
+  }
+
+  function lowerChain(node) {
+    const stages = node.stages || [];
+    if (stages.length === 0) return { kind: 'const', value: 0 };
+    if (stages.length === 1) return lowerNode(stages[0]);
+
+    let prevRef = lowerNode(stages[0]);
+
+    for (let i = 1; i < stages.length; i++) {
+      const stage = stages[i];
+      if (stage.t === 'call') {
+        const kernel = chooseKernel(stage.op, stage.kwargs);
+        const stageIns = [prevRef, ...stage.args.map(lowerNode)].slice(0, 5);
+        const params = {};
+        const flags = [];
+        for (const [k, v] of Object.entries(stage.kwargs)) {
+          if (v.t === 'num') params[k] = v.v;
+          else if (v.t === 'flag') flags.push(k);
+        }
+        const meta = flags.length ? { flags } : {};
+        prevRef = allocSlot(kernel, stageIns, params, meta);
+      } else {
+        prevRef = lowerNode(stage);
+      }
+    }
+    return prevRef;
+  }
+
+  // Resolve an output-jack sink to its terminal jack name.
+  function resolveJackSink(jack, labels) {
+    const valid = JACK_LABELS[jack];
+    const labelKeys = labels.filter(l => !INTERP_FLAGS.has(l));
+    const label = labelKeys.length ? labelKeys[0] : undefined;
+    if (label === undefined || !valid.includes(label)) {
+      const list = valid.map(l => `${jack} :${l}`).join(' and ');
+      throw new Error(`(${jack} :${label ?? '?'}): no such jack; this module has ${list}`);
+    }
+    return {
+      jackName: `${jack}-${label}`,
+      bipolar: labels.includes('bipolar'),
+      vOct:    labels.includes('v-oct'),
+    };
+  }
+
+  // Direction-typed input jacks cannot be written to.
+  const INPUT_JACK_OPS = new Set(['cv-in', 'audio-in', 'pulse-in', 'knob']);
+
+  function lowerCable(cable) {
+    const { sink, value, kwargs } = cable;
+
+    if (sink.t === 'call' && INPUT_JACK_OPS.has(sink.op)) {
+      const label = jackLabel(sink.op, sink.kwargs);
+      throw new Error(`${sink.op} :${label} is an input, cannot write to it`);
+    }
+    if (sink.t === 'call' && sink.op === 'switch') {
+      throw new Error(`switch :z is an input, cannot write to it`);
+    }
+
+    // Scatter sink: route X to the sel-th jack of the family.
+    if (sink.t === 'jackscatter') {
+      const family = JACK_LABELS[sink.jack];
+      const N = family.length;
+      const valRef = lowerNode(value);
+      const selRef = lowerNode(sink.selector);
+      const kRef    = { kind: 'const', value: N };
+      const mod1    = allocSlot('op_mod', [selRef, kRef], {}, { state: [] });
+      const addK    = allocSlot('op_add', [mod1, kRef], {}, { state: [] });
+      const wrapped = allocSlot('op_mod', [addK, kRef], {}, { state: [] });
+      for (let i = 0; i < N; i++) {
+        const jackName = `${sink.jack}-${family[i]}`;
+        const iRef  = { kind: 'const', value: i };
+        const cond  = allocSlot('op_eq', [wrapped, iRef], {}, { state: [] });
+        const normal = jackNormals.get(jackName);
+        const elseRef = normal ? lowerNode(normal) : { kind: 'const', value: 0 };
+        const drive = allocSlot('op_if', [cond, valRef, elseRef], {}, { state: [] });
+        const kernel = 'op_terminal_write_' + jackName.replace(/-/g, '_');
+        const slotRef = allocSlot(kernel, [drive], {}, { state: [], jack: jackName });
+        terminals.push({ jack: jackName, slotId: slotRef.id });
+      }
+      return;
+    }
+
+    // Output jack sink: (<- (cv-out :1) X).
+    if (sink.t === 'jacksink') {
+      const { jackName, bipolar, vOct } = resolveJackSink(sink.jack, sink.labels);
+      if (scatterFamilies.has(sink.jack)) return;
+      let valRef = lowerNode(value);
+      if (sink.jack === 'cv-out' && bipolar && !vOct) {
+        valRef = allocSlot('op_cv', [valRef], { param0: 1 }, { state: [] });
+      }
+      const kernel = 'op_terminal_write_' + jackName.replace(/-/g, '_');
+      const slotRef = allocSlot(kernel, [valRef], {}, { state: [], jack: jackName });
+      const mode = (sink.jack === 'cv-out' && vOct) ? 1 : 0;
+      terminals.push({ jack: jackName, slotId: slotRef.id, mode });
+      return;
+    }
+
+    if (sink.t === 'sym' && TERMINAL_SINKS.has(sink.s)) {
+      const valRef = lowerNode(value);
+      const jackSuffix = sink.s.replace(/-/g, '_');
+      const kernel = 'op_terminal_write_' + jackSuffix;
+      const slotRef = allocSlot(kernel, [valRef], {}, { state: [], jack: sink.s });
+      terminals.push({ jack: sink.s, slotId: slotRef.id });
+      return;
+    }
+
+    // Buffer sink (tape / audio / lens).
+    emitRecordhead(sink, value, kwargs);
+  }
+
+  // Build a recordhead slot for a buffer-sink cable.
+  function emitRecordhead(sink, value, kwargs) {
+    const bufRef = lowerNode(sink);
+    const kernel = recordheadKernel(kwargs);
+    const valRef = lowerCableValue(value, kwargs);
+    const params = {};
+    for (const [k, v] of Object.entries(kwargs)) {
+      if (k === 'per-sample' || v.t === 'flag' || v.t !== 'num') continue;
+      params[k] = v.v;
+    }
+    const dynLen = kwargs.len && kwargs.len.t !== 'num' && kwargs.len.t !== 'flag';
+    if (kernel === 'op_recordhead_len_capped_gated' && dynLen) {
+      throw new Error('recordhead :len with :when must be a constant cap, not a stream');
+    }
+    const extraIns = [];
+    const pushDyn = ref => { if (ref && ref.t !== 'num' && ref.t !== 'flag') extraIns.push(lowerNode(ref)); };
+    pushDyn(kwargs.when);
+    pushDyn(kwargs.len);
+    if (kwargs.trig) extraIns.push(lowerNode(kwargs.trig));
+    if (kernel === 'op_recordhead_per_sample' && 'when' in kwargs) {
+      params.param0 = (params.param0 || 0) | 1;
+    }
+    if (extraIns.length > 2) {
+      throw new Error(`recordhead has too many dynamic inputs (${2 + extraIns.length} > 5 slots)`);
+    }
+    const allIns = [valRef, bufRef, ...extraIns].slice(0, 5);
+    allocSlot(kernel, allIns, params);
+  }
+
+  function lowerCableValue(value, kwargs) {
+    if (value.t === 'chain') {
+      return lowerChain(value);
+    }
+    return lowerNode(value);
+  }
+
+  // Scatter fall-through pre-scan.
+  const scatterFamilies = new Set();
+  for (const c of expanded.cables) {
+    if (c.sink && c.sink.t === 'jackscatter') scatterFamilies.add(c.sink.jack);
+  }
+  const jackNormals = new Map(); // jackName -> value node
+  for (const c of expanded.cables) {
+    if (c.sink && c.sink.t === 'jacksink' && scatterFamilies.has(c.sink.jack)) {
+      const { jackName } = resolveJackSink(c.sink.jack, c.sink.labels);
+      jackNormals.set(jackName, c.value);
+    }
+  }
+
+  // Lower all cables.
+  for (const cable of expanded.cables) {
+    lowerCable(cable);
+  }
+
+  // Post-pass: wire op_tap.in[2] to the paired recordhead's head_pos_out.
+  {
+    const RECORDHEAD_KERNELS = new Set([
+      'op_recordhead_per_sample', 'op_recordhead_per_cell',
+      'op_recordhead_gated', 'op_recordhead_len_capped', 'op_recordhead_len_capped_gated',
+    ]);
+    const bufToRecHead = new Map();
+    for (const slot of slots) {
+      if (!RECORDHEAD_KERNELS.has(slot.kernel)) continue;
+      const bufIn = slot.in[1];
+      if (bufIn && bufIn.kind === 'buffer') bufToRecHead.set(bufIn.id, slot.id);
+    }
+    for (const slot of slots) {
+      if (slot.kernel !== 'op_tap') continue;
+      const bufIn = slot.in[0];
+      if (!bufIn || bufIn.kind !== 'buffer') continue;
+      const recHeadId = bufToRecHead.get(bufIn.id);
+      if (recHeadId == null) continue;
+      slot.in[2] = { kind: 'slot', id: recHeadId, read: 'head' };
+    }
+  }
+
+  // Post-pass: fold N-ary inputs on strictly binary kernels into a binary tree.
+  const BINARY_KERNELS = new Set(['op_add2', 'op_mul2', 'op_mix2', 'op_and2', 'op_or2']);
+  const NEEDS_BINARY = new Set([...BINARY_KERNELS, 'op_add', 'op_mul', 'op_and', 'op_or']);
+  for (const slot of slots.slice()) {
+    if (!NEEDS_BINARY.has(slot.kernel)) continue;
+    if (slot.in.length <= 2) continue;
+    let refs = slot.in.slice();
+    const kernel = BINARY_KERNELS.has(slot.kernel) ? slot.kernel : slot.kernel + '2';
+    while (refs.length > 2) {
+      const next = [];
+      for (let i = 0; i < refs.length; i += 2) {
+        if (i + 1 < refs.length) {
+          next.push(allocSlot(kernel, [refs[i], refs[i + 1]], slot.params, {}));
+        } else {
+          next.push(refs[i]);
+        }
+      }
+      refs = next;
+    }
+    slot.in = refs.slice(0, 2);
+    slot.kernel = kernel;
+  }
+
+  return { buffers, slots, terminals };
+}
+
+// Sanity check: assert structural invariants on a lowered graph.
+function verify(graph) {
+  const errors = [];
+  const slotIds = new Set(graph.slots.map(s => s.id));
+  const bufIds = new Set(graph.buffers.map(b => b.id));
+
+  function checkRef(ref, ctx) {
+    if (!ref) { errors.push(`${ctx}: null ref`); return; }
+    if (ref.kind === 'slot' && !slotIds.has(ref.id)) {
+      errors.push(`${ctx}: dangling slot ref ${ref.id}`);
+    }
+    if (ref.kind === 'buffer' && !bufIds.has(ref.id)) {
+      errors.push(`${ctx}: dangling buffer ref ${ref.id}`);
+    }
+  }
+
+  const seenSlotIds = new Set();
+  for (const slot of graph.slots) {
+    if (seenSlotIds.has(slot.id)) {
+      errors.push(`duplicate slot id ${slot.id}`);
+    }
+    seenSlotIds.add(slot.id);
+    for (let i = 0; i < slot.in.length; i++) {
+      checkRef(slot.in[i], `slot[${slot.id}].in[${i}]`);
+    }
+  }
+
+  for (const term of graph.terminals) {
+    if (!slotIds.has(term.slotId)) {
+      errors.push(`terminal ${term.jack}: dangling slot ref ${term.slotId}`);
+    }
+  }
+
+  /* Structural invariants */
+
+  // 1. Every hw-leaf kernel must carry param0 in 0..9 (jack index).
+  const HW_LEAVES = new Set(['op_knob', 'op_cv_in', 'op_audio_in', 'op_pulse_in', 'op_switch']);
+  for (const slot of graph.slots) {
+    if (HW_LEAVES.has(slot.kernel)) {
+      const p0 = slot.params?.param0;
+      if (typeof p0 !== 'number' || p0 < 0 || p0 > 9) {
+        errors.push(`slot[${slot.id}] ${slot.kernel}: param0 must be a valid jack index 0..9, got ${p0}`);
+      }
+    }
+  }
+
+  // 2. Oscillator kernels must have in[0] routed.
+  const OSCILLATORS = new Set(['op_phasor', 'op_sine', 'op_triangle', 'op_saw', 'op_square']);
+  for (const slot of graph.slots) {
+    if (OSCILLATORS.has(slot.kernel)) {
+      if (!slot.in || slot.in.length === 0 || slot.in[0] == null) {
+        errors.push(`slot[${slot.id}] ${slot.kernel}: in[0] missing (oscillator must route a rate input)`);
+      }
+    }
+  }
+
+  // 3. No leading-underscore param keys (internal-only markers).
+  for (const slot of graph.slots) {
+    if (!slot.params) continue;
+    for (const k of Object.keys(slot.params)) {
+      if (k.startsWith('_')) {
+        errors.push(`slot[${slot.id}] ${slot.kernel}: param "${k}" looks internal-only (leading underscore); the snapshot encoder will not write it`);
+      }
+    }
+  }
+
+  return errors;
+}
+
+module.exports = { lower, verify, HW_JACKS };
+
+});
+__def("scheduler.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+
+// Scheduler: global topological sort, dual-core partition, single-writer verification.
+// Input: lowered graph. There is no rate classification: every slot runs each
+// sample and the runtime skips the unchanged ones.
+// Output: { sampleRate, writerMap, violations, terminalFeedReport, ... }
+//   sampleRate: [{ slotId, core }] in one global topological order (all slots)
+//   writerMap: Map< `${slotId}.${field}`, slotId >
+//   violations: single-writer violation list (empty if clean)
+//   terminalFeedReport: [{ slotId, kernel, core, jack, accepted }] — one entry per
+//       source slot feeding a terminal write; accepted=true if moved to Core 0
+
+// ---------------------------------------------------------------------------
+// Stub-kernel registry.
+//
+// Each entry has:
+//   kernel:    string, the op_ name
+//   gap:       human-readable name of the gap (from language-gaps.md)
+//   predicate: fn(slot) -> bool, true if this slot instance is the stub case.
+//              For "always" stubs use () => true.
+//
+// schedule() scans all slots after the budget check.
+// Any match throws with the offending slot list.
+// ---------------------------------------------------------------------------
+const STUB_KERNELS = [
+  {
+    // thru with :on — the expander inlines op-lens calls so the full pipeline
+    // never emits op_thru with in[2]. This entry catches manual graph construction
+    // or future lowering paths that miss the expander rewrite.
+    kernel: 'op_thru',
+    gap: 'thru :on op-lens application',
+    predicate: slot => slot.in.length >= 3 && slot.in[2] != null,
+  },
+  {
+    // op_record with no :on path means the lowerer missed a rewrite to recordhead_*.
+    kernel: 'op_record',
+    gap: 'op_record stub if not rewired',
+    predicate: () => true,
+  },
+  {
+    kernel: 'op_stub',
+    gap: 'sentinel: op_stub should never appear in lowered output',
+    predicate: () => true,
+  },
+];
+
+const BUDGET_PER_SAMPLE = 5208; // 250 MHz / 48 kHz
+const OVERHEAD_CORE0 = 2000;    // publish, ring, spin-wait, commit, drive outputs
+const OVERHEAD_CORE1 = 500;     // FIFO drain, signal done
+
+// --- Single-vs-dual decision knobs (TUNABLE) ---------------------------------
+// These are deliberately approximate. The real per-sample overheads will be
+// measured on hardware later (cost.py / perf probe); the threshold below only
+// needs to be in the right ballpark to keep trivial patches single-core.
+//
+// OVERHEAD_SINGLE: per-sample fixed cost the per-slot sum doesn't capture, measured
+//   on hardware as the walk intercept (~385 cyc fixed walk overhead) + io (~350:
+//   hw read, recordhead sweep, drive terminals). The per-kernel CYCLE_COST is the
+//   marginal slope; this is the intercept.
+const OVERHEAD_SINGLE = 735;
+// IMBALANCE_BOUND: edge-reduction local search may move a slot across cores
+//   only while |c0-c1|/total stays at or below this fraction. Keeps the split
+//   roughly balanced while trimming cross-core edges.
+const IMBALANCE_BOUND = 0.10;
+// TERMINAL_FEED_IMBALANCE: the terminal-feed pass colocates a jack writer with
+//   its feeder on Core 0 and tolerates a looser bound than IMBALANCE_BOUND,
+//   since saving a cross-core hop on an output is worth a heavier Core 0.
+const TERMINAL_FEED_IMBALANCE = 0.20;
+
+// Per-kernel cost in REAL hardware cycles, measured on the card by the delta method
+// (chain N instances, marginal walk cycles per added instance via cli perf; see
+// tools/calibrate-cost.js). The ~133 floor is the per-slot dispatch cost in step_slot
+// (the skip-check + indirect call) before any kernel math; unmeasured kernels default
+// to it in costOf(). Re-measure if the runtime hot loop or clock changes.
+const CYCLE_COST = {
+  op_saw: 70, op_square: 95, op_triangle: 50, op_sine: 64, op_phasor: 53,
+  op_lpf: 51, op_hpf: 54, op_average: 51, op_slew: 51, op_lpg: 74, op_envfollow: 54,
+  op_vcf: 84,
+  op_wavefold: 69, op_crush: 42, op_saturate: 80, op_ring: 73, op_vca: 73,
+  op_schmitt: 38, op_envelope: 64, op_noise: 43,
+  op_kick: 185, op_snare: 193, op_hat: 170,
+  op_euclid: 55, op_every: 46, op_turns: 43, op_counter: 44,
+  op_random: 45, op_chance: 45, op_walk: 47, op_follow: 70,
+  op_gate: 45, op_edge: 42, op_fall: 45, op_diff: 36, op_toggle: 40, op_hold: 37,
+  op_z1: 35, op_mix2: 40, op_window: 40, op_add_sat: 38, op_sub_sat: 38,
+  // Estimates (buffer/memory ops not directly chainable; floor + addressing work).
+  op_wave: 112, op_wave_drumrack: 112, op_tap: 82,
+  op_recordhead_per_sample: 102, op_recordhead_per_cell: 102, op_recordhead_gated: 102,
+  op_recordhead_len_capped: 102, op_recordhead_len_capped_gated: 102,
+  op_step: 62, op_onsets: 62, op_gates: 62, op_hits: 62,
+  op_snap: 82, op_thru: 52, op_degree: 62, op_pitch: 62,
+};
+
+const DISPATCH_FLOOR = 35; // per-slot overhead before kernel math (step_slot), post skip-check removal
+
+function costOf(kernel) {
+  return CYCLE_COST[kernel] ?? DISPATCH_FLOOR;
+}
+
+// Topological sort of the slot list. Stable (by slot id) for determinism.
+// Producer-before-consumer order within a core is REQUIRED: same-core reads see
+// the producer's fresh value this sample. Cross-core reads are unit-delayed via a
+// shadow published at the sample boundary (snapshot_apply wires cross-core inputs
+// to the producer's shadow; runtime publishes shadows after both core walks), so
+// cross-core walk order does not affect the result.
+function topoSort(slots) {
+  const inGroup = new Set(slots.map(s => s.id));
+  const order = [];
+  const visited = new Set();
+
+  function visit(slot) {
+    if (visited.has(slot.id)) return;
+    visited.add(slot.id);
+    // Visit dependencies that are in the same group first.
+    for (const ref of slot.in) {
+      if (ref.kind === 'slot' && inGroup.has(ref.id)) {
+        const dep = slots.find(s => s.id === ref.id);
+        if (dep) visit(dep);
+      }
+    }
+    order.push(slot);
+  }
+
+  // Process in id order for determinism.
+  const sorted = [...slots].sort((a, b) => a.id - b.id);
+  for (const slot of sorted) visit(slot);
+  return order;
+}
+
+// Cost-balanced greedy: sort by cost descending, assign to lighter core.
+// pinnedToCore0: Set of slot ids that must land on Core 0 (terminal-feeding
+// slots) so runtime_drive_terminals (Core 0 only) reads their values without a
+// 1-sample cross-core lag on the most audible outputs.
+function greedyBalance(slots, pinnedToCore0) {
+  const pinned = pinnedToCore0 || new Set();
+  const byCost = [...slots].sort((a, b) => costOf(b.kernel) - costOf(a.kernel));
+  const coreLoad = [0, 0];
+  const coreOf = new Map();
+
+  // First pass: pin terminal-feeding slots to Core 0.
+  for (const slot of byCost) {
+    if (pinned.has(slot.id)) {
+      coreOf.set(slot.id, 0);
+      coreLoad[0] += costOf(slot.kernel);
+    }
+  }
+  // Second pass: assign remaining slots to the lighter core.
+  for (const slot of byCost) {
+    if (!coreOf.has(slot.id)) {
+      const core = coreLoad[0] <= coreLoad[1] ? 0 : 1;
+      coreOf.set(slot.id, core);
+      coreLoad[core] += costOf(slot.kernel);
+    }
+  }
+
+  return coreOf;
+}
+
+// Sum costOf over a slot set on each core, given a coreOf map.
+function coreLoads(slots, coreOf) {
+  const load = [0, 0];
+  for (const slot of slots) load[coreOf.get(slot.id) ?? 0] += costOf(slot.kernel);
+  return load;
+}
+
+// Count cross-core edges: producer->consumer slot refs whose cores differ.
+// Each differing (consumer, input-ref-to-a-slot-in-this-group) pair is one edge.
+function crossCoreEdges(slots, coreOf) {
+  const inGroup = new Set(slots.map(s => s.id));
+  let edges = 0;
+  for (const slot of slots) {
+    const cc = coreOf.get(slot.id) ?? 0;
+    for (const ref of (slot.in || [])) {
+      if (ref.kind === 'slot' && inGroup.has(ref.id)) {
+        const pc = coreOf.get(ref.id) ?? 0;
+        if (pc !== cc) edges++;
+      }
+    }
+  }
+  return edges;
+}
+
+// Local-search pass: starting from a cost-balanced split, move single slots to
+// the other core when the move strictly reduces the cross-core edge count and
+// keeps |c0-c1|/total <= IMBALANCE_BOUND. Pinned slots stay on Core 0. Repeats
+// until a pass makes no improving move. Co-minimises imbalance and edges.
+// Recomputes edges per candidate move (O(slots*edges) per pass): compile-time
+// only, off the audio path, and bounded by LENS_MAX_SLOTS (256).
+function edgeMinimisePass(slots, coreOf, pinnedToCore0) {
+  const pinned = pinnedToCore0 || new Set();
+  const load = coreLoads(slots, coreOf);
+  const total = load[0] + load[1];
+  if (total === 0) return coreOf;
+
+  let improved = true;
+  while (improved) {
+    improved = false;
+    for (const slot of slots) {
+      if (pinned.has(slot.id)) continue;
+      const from = coreOf.get(slot.id) ?? 0;
+      const to = from ^ 1;
+      const cost = costOf(slot.kernel);
+
+      // Imbalance after the tentative move.
+      const nl0 = from === 0 ? load[0] - cost : load[0] + cost;
+      const nl1 = from === 1 ? load[1] - cost : load[1] + cost;
+      const imbal = Math.abs(nl0 - nl1) / total;
+      if (imbal > IMBALANCE_BOUND) continue;
+
+      const before = crossCoreEdges(slots, coreOf);
+      coreOf.set(slot.id, to);
+      const after = crossCoreEdges(slots, coreOf);
+      if (after < before) {
+        load[0] = nl0; load[1] = nl1;
+        improved = true;
+      } else {
+        coreOf.set(slot.id, from); // revert
+      }
+    }
+  }
+  return coreOf;
+}
+
+// Decide single-vs-dual for the slot list and return its coreOf map.
+//
+// total       = sum costOf over all slots in the group.
+// dual greedy = cost-balanced split -> per-core loads c0,c1.
+// single_wall = total + OVERHEAD_SINGLE  (no ring/spin/publish).
+// dual_wall   = max(c0 + OVERHEAD_CORE0, c1 + OVERHEAD_CORE1).
+//
+// Stay single-core when one core fits the budget AND it is no slower than the
+// dual split. Otherwise split and minimise cross-core edges. The returned map
+// plus a `dual` flag let the caller report the chosen mode.
+function decidePartition(slots, pinnedToCore0) {
+  const total = slots.reduce((a, s) => a + costOf(s.kernel), 0);
+
+  // Tentative dual split (greedy balance, then edge minimisation).
+  const dualCoreOf = greedyBalance(slots, pinnedToCore0);
+  edgeMinimisePass(slots, dualCoreOf, pinnedToCore0);
+  const [c0, c1] = coreLoads(slots, dualCoreOf);
+
+  const single_wall = total + OVERHEAD_SINGLE;
+  const dual_wall   = Math.max(c0 + OVERHEAD_CORE0, c1 + OVERHEAD_CORE1);
+
+  // Test hook: LENS_FORCE_DUAL forces a split so the dual-core path (cross-core
+  // shadows, serial-vs-c0first-vs-c1first equivalence) can be exercised even
+  // though the cost model currently keeps every real patch single-core.
+  if (typeof process !== 'undefined' && process.env.LENS_FORCE_DUAL && c1 > 0) return { coreOf: dualCoreOf, dual: true };
+
+  if (single_wall <= BUDGET_PER_SAMPLE && single_wall <= dual_wall) {
+    // Single-core: everything on Core 0; Core 1 stays empty so the runtime
+    // skips the doorbell handshake.
+    const coreOf = new Map();
+    for (const slot of slots) coreOf.set(slot.id, 0);
+    return { coreOf, dual: false };
+  }
+  return { coreOf: dualCoreOf, dual: true };
+}
+
+// Build the ordered [{slotId, core}] list preserving topological order.
+function buildList(sortedSlots, coreOf) {
+  return sortedSlots.map(s => ({ slotId: s.id, core: coreOf.get(s.id) ?? 0 }));
+}
+
+// Single-writer verifier.
+// Each slot's NodeState fields are declared in slot.meta.state.
+// The verifier checks that no (slotId, field) pair is claimed by more than one slot.
+// Since each slot owns its own state by construction, the check is:
+//   for all slot s, for all field f in s.meta.state: (s.id, f) is unique.
+// We also check that slot.out always points to the slot's OWN state (s.out.slotId === s.id).
+function buildWriterMap(slots) {
+  const writerMap = new Map(); // key `${slotId}.${field}` -> ownerSlotId
+  const violations = [];
+
+  for (const slot of slots) {
+    // Check out field ownership.
+    if (slot.out && slot.out.slotId !== slot.id) {
+      violations.push({
+        slot: slot.id,
+        field: slot.out.field,
+        otherSlot: slot.out.slotId,
+        kind: 'cross-slot-out',
+      });
+    }
+
+    for (const field of (slot.meta.state || [])) {
+      const key = `${slot.id}.${field}`;
+      if (writerMap.has(key)) {
+        violations.push({
+          slot: slot.id,
+          field,
+          otherSlot: writerMap.get(key),
+          kind: 'duplicate-state-field',
+        });
+      } else {
+        writerMap.set(key, slot.id);
+      }
+    }
+  }
+
+  return { writerMap, violations };
+}
+
+// Terminal-feed priority pass (sample rate only).
+// For each sample-rate slot that feeds a terminal-write slot directly, try to
+// move it to Core 0. Skip if the move would make Core 0's cycle total more than
+// 20% heavier than Core 1's.
+// SPEC: terminal-write slots themselves are already pinned to Core 0 by partition().
+// Moving their source slots to Core 0 avoids an extra cross-core read lag on the
+// most audible outputs.
+function terminalFeedPass(sortedSlots, coreOf, terminalWriteIds) {
+  const slotMap = new Map(sortedSlots.map(s => [s.id, s]));
+
+  // Compute current per-core cycle load.
+  const coreLoad = [0, 0];
+  for (const slot of sortedSlots) {
+    const core = coreOf.get(slot.id) ?? 0;
+    coreLoad[core] += costOf(slot.kernel);
+  }
+
+  // Build set of source slot ids (direct inputs to terminal-write slots).
+  const terminalSourceIds = new Set();
+  const sourceToJack = new Map(); // slotId -> jack name(s) for reporting
+  for (const slot of sortedSlots) {
+    if (!terminalWriteIds.has(slot.id)) continue;
+    for (const ref of (slot.in || [])) {
+      if (ref.kind === 'slot') {
+        terminalSourceIds.add(ref.id);
+        const jacks = sourceToJack.get(ref.id) || [];
+        // Recover jack from kernel name: op_terminal_write_audio_out_1 -> audio-out-1.
+        const jack = slot.kernel.replace('op_terminal_write_', '').replace(/_/g, '-');
+        jacks.push(jack);
+        sourceToJack.set(ref.id, jacks);
+      }
+    }
+  }
+
+  const report = [];
+
+  for (const slotId of terminalSourceIds) {
+    const slot = slotMap.get(slotId);
+    const currentCore = coreOf.get(slotId) ?? 0;
+    const jacks = sourceToJack.get(slotId) || [];
+
+    if (currentCore === 0) {
+      // Already on Core 0 — no action needed.
+      report.push({ slotId, kernel: slot ? slot.kernel : '?', core: 0, jacks, accepted: true, moved: false });
+      continue;
+    }
+
+    // Simulate moving to Core 0: check 20% imbalance threshold.
+    const cost = costOf(slot ? slot.kernel : 'unknown');
+    const newLoad0 = coreLoad[0] + cost;
+    const newLoad1 = coreLoad[1] - cost;
+    const totalLoad = newLoad0 + newLoad1;
+    // Reject if Core 0 would be more than TERMINAL_FEED_IMBALANCE heavier.
+    const imbalanced = totalLoad > 0 && (newLoad0 - newLoad1) / totalLoad > TERMINAL_FEED_IMBALANCE;
+
+    if (imbalanced) {
+      // SPEC: cross-core lag accepted here; Core 0 would become too heavy.
+      report.push({ slotId, kernel: slot ? slot.kernel : '?', core: 1, jacks, accepted: false, moved: false });
+    } else {
+      coreOf.set(slotId, 0);
+      coreLoad[0] = newLoad0;
+      coreLoad[1] = newLoad1;
+      report.push({ slotId, kernel: slot ? slot.kernel : '?', core: 0, jacks, accepted: true, moved: true });
+    }
+  }
+
+  return report;
+}
+
+// Returns per-core cycle budget report.
+// kernelOfSlot: Map<slotId, kernelName>
+// dual: when false (single-core), Core 0 pays only OVERHEAD_SINGLE (no doorbell
+//   ring/spin/publish) and Core 1 is empty, matching the runtime skip path.
+function verifyBudget(sampleRate, kernelOfSlot, dual = true) {
+  const overhead = dual ? [OVERHEAD_CORE0, OVERHEAD_CORE1]
+                        : [OVERHEAD_SINGLE, 0];
+  const sr = [0, 0];
+  for (const entry of sampleRate) {
+    const k = kernelOfSlot.get(entry.slotId) ?? 'unknown';
+    sr[entry.core] += costOf(k);
+  }
+
+  const results = [0, 1].map(c => {
+    const total = overhead[c] + sr[c];
+    return { sr: sr[c], overhead: overhead[c], total, budget: BUDGET_PER_SAMPLE, ok: total <= BUDGET_PER_SAMPLE };
+  });
+
+  return {
+    core0: results[0],
+    core1: results[1],
+    ok: results[0].ok && results[1].ok,
+  };
+}
+
+function schedule(graph) {
+  // One global topological order over ALL slots. No sample/control split: the
+  // runtime runs every slot each sample and skips the unchanged ones. Producers
+  // precede consumers so an intra-core read sees this sample's fresh value.
+  const sorted = topoSort(graph.slots);
+
+  // Terminal-write slot ids (op_terminal_write_*) are pinned to Core 0.
+  const terminalWriteIds = new Set(graph.terminals.map(t => t.slotId));
+
+  const decision = decidePartition(sorted, terminalWriteIds);
+  const coreOf = decision.coreOf;
+  const dual = decision.dual;
+  const mode = dual ? 'dual' : 'single';
+
+  // Cross-core edge counts before/after the edge-minimise pass, for reporting.
+  let edgesBefore = 0, edgesAfter = 0;
+  if (dual) {
+    const baseline = greedyBalance(sorted, terminalWriteIds);
+    edgesBefore = crossCoreEdges(sorted, baseline);
+    edgesAfter  = crossCoreEdges(sorted, coreOf);
+  }
+
+  const terminalFeedReport = terminalFeedPass(sorted, coreOf, terminalWriteIds);
+
+  // One ordered slot list over all slots.
+  const sampleRate = buildList(sorted, coreOf);
+
+  const { writerMap, violations } = buildWriterMap(graph.slots);
+
+  const kernelOfSlot = new Map(graph.slots.map(s => [s.id, s.kernel]));
+  const budget = verifyBudget(sampleRate, kernelOfSlot, dual);
+
+  // Over-budget is a runtime performance concern, not a compile error: the patch
+  // still produces a valid graph and the card runs it (degrading if truly over). So
+  // report it (budget.ok=false, surfaced to the caller / cli) but do not throw.
+  if (!budget.ok) {
+    const parts = [];
+    for (const [label, r] of [['core0', budget.core0], ['core1', budget.core1]]) {
+      if (!r.ok) parts.push(`${label}: sr=${r.sr}+overhead=${r.overhead}=${r.total} > budget=${r.budget}`);
+    }
+    budget.warning = `cycle budget exceeded — ${parts.join('; ')}`;
+  }
+
+  // Stub-kernel scan: refuse to schedule any patch that contains a known stub.
+  // This runs after the budget check so the budget error message reaches the user first.
+  const stubHits = [];
+  for (const slot of graph.slots) {
+    for (const entry of STUB_KERNELS) {
+      if (slot.kernel === entry.kernel && entry.predicate(slot)) {
+        stubHits.push({ slotId: slot.id, kernel: slot.kernel, gap: entry.gap });
+      }
+    }
+  }
+  if (stubHits.length > 0) {
+    const lines = stubHits.map(
+      h => `  slot ${h.slotId}: ${h.kernel} — gap: "${h.gap}"`
+    );
+    throw new Error(
+      `patch uses unimplemented language features (see SPECS/language-gaps.md):\n` +
+      lines.join('\n')
+    );
+  }
+
+  return {
+    sampleRate, writerMap, violations, terminalFeedReport, budget,
+    mode, dual, edgesBefore, edgesAfter,
+  };
+}
+
+module.exports = { schedule, costOf, verifyBudget, crossCoreEdges };
+
+});
+__def("snapshot.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+
+// Snapshot encoder/decoder for Lens.
+// encode(scheduled, graph) -> Uint8Array
+// decode(bytes) -> { sampleRate, buffers, terminals }
+//
+// Wire layout (all little-endian):
+//   HEADER (16 bytes)
+//   KERNEL REGISTRY
+//   SLOT TABLE (every slot in walk order)
+//   BUFFER TABLE
+//   TERMINAL TABLE
+//   CRC32 (4 bytes, IEEE 802.3)
+
+const MAGIC = [0x4C, 0x45, 0x4E, 0x53, 0x32]; // snapshot wire magic, 5 bytes; matches LENS_MAGIC in runtime/snapshot_format.h
+const VERSION = 10;
+
+// SPEC: jack id encoding.
+const JACK_IDS = {
+  'audio-out-1': 0, 'audio-out-2': 1,
+  'cv-out-1': 2,    'cv-out-2': 3,
+  'pulse-out-1': 4, 'pulse-out-2': 5,
+  'led-0': 6, 'led-1': 7, 'led-2': 8,
+  'led-3': 9, 'led-4': 10, 'led-5': 11,
+};
+const JACK_NAMES = Object.fromEntries(Object.entries(JACK_IDS).map(([k, v]) => [v, k]));
+
+// SPEC: in_ref tag encoding.
+const TAG_SLOT             = 0;
+const TAG_BUFFER           = 1;
+const TAG_CONST_U8         = 2;
+const TAG_CONST_I32        = 3;
+const TAG_SLOT_OUT2        = 4; /* slot ref pointing at a producer's second output (+4): recordhead head_pos, phasor tick */
+
+// SPEC: buffer kind encoding.
+const BUF_KINDS = { tape: 0, audio: 1, lens: 2 };
+const BUF_KIND_NAMES = ['tape', 'audio', 'lens'];
+
+// SPEC: param0 holds the one structural word a kernel needs (mode/jack/port/mask/
+// seed/flags). Every other value a kernel reads is an input.
+// An explicit 'param0' key maps directly; otherwise a single named kwarg folds in.
+// A nonzero p1 is a compile error (asserted at the write site).
+function encodeParams(params) {
+  if (!params) return [0, 0];
+  if ('param0' in params || 'param1' in params) {
+    return [(params.param0 ?? 0) >>> 0, (params.param1 ?? 0) >>> 0];
+  }
+  const keys = Object.keys(params).sort();
+  const p0 = keys.length > 0 ? (params[keys[0]] >>> 0) : 0;
+  const p1 = keys.length > 1 ? (params[keys[1]] >>> 0) : 0;
+  return [p0, p1];
+}
+
+// ---- CRC-32 IEEE 802.3 (polynomial 0xEDB88320) ----
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// ---- Writer ----
+class Writer {
+  constructor() { this._buf = []; }
+  u8(v) { this._buf.push(v & 0xFF); }
+  u16(v) { this.u8(v); this.u8(v >> 8); }
+  u32(v) { const u = v >>> 0; this.u8(u); this.u8(u>>8); this.u8(u>>16); this.u8(u>>24); }
+  i32(v) { this.u32(v >>> 0); }
+  bytes() { return new Uint8Array(this._buf); }
+  len() { return this._buf.length; }
+}
+
+// ---- Reader ----
+class Reader {
+  constructor(bytes) { this._b = bytes; this._p = 0; }
+  u8() { return this._b[this._p++]; }
+  u16() { const v = this._b[this._p] | (this._b[this._p+1]<<8); this._p+=2; return v; }
+  u32() { const v = (this._b[this._p]|(this._b[this._p+1]<<8)|(this._b[this._p+2]<<16)|((this._b[this._p+3]<<24)>>>0)); this._p+=4; return v>>>0; }
+  i32() { return this.u32() | 0; }
+  str(n) { const s = String.fromCharCode(...this._b.slice(this._p, this._p+n)); this._p+=n; return s; }
+  pos() { return this._p; }
+  remaining() { return this._b.length - this._p; }
+}
+
+// ---- Pool limits (mirror C constants in runtime.h) ----
+const LENS_AUDIO_BUFFER_BYTES   = 128 * 1024;  /* matches runtime.h; cells are 12-bit packed */
+const LENS_CONTROL_BUFFER_BYTES = 1024;
+const LENS_MAX_SLOTS            = 256;
+const LENS_NODESTATE_BYTES      = 4 * 1024;
+const LENS_MAX_BUFFERS          = 16;
+const LENS_MAX_TERMINALS        = 16;
+const LENS_CONST_POOL_WORDS     = 64;
+
+// ---- Encoder ----
+function encode(scheduled, graph) {
+  // scheduled = { sampleRate, writerMap, violations, terminalFeedReport, budget, mode, dual }
+  // graph = { slots, buffers, terminals }
+
+  // Single-writer enforcement: the scheduler verifier guarantees each slot's
+  // state fields are owned by exactly one writer. Reject snapshots that violate
+  // this contract before encoding, since the dual-core runtime relies on it.
+  if (scheduled.violations && scheduled.violations.length > 0) {
+    const lines = scheduled.violations.map(v =>
+      `  slot ${v.slot} field "${v.field}" (kind: ${v.kind}, other: ${v.otherSlot})`
+    ).join('\n');
+    throw new Error(`single-writer violation(s) — cannot encode dual-core snapshot:\n${lines}`);
+  }
+
+  const slotMap = new Map(graph.slots.map(s => [s.id, s]));
+
+  // Every slot in walk (topological) order.
+  const allEntries = scheduled.sampleRate;
+
+  // Build kernel registry (unique names in walk order of first appearance).
+  const kernelNames = [];
+  const kernelIndex = new Map();
+  for (const entry of allEntries) {
+    const slot = slotMap.get(entry.slotId);
+    const name = slot ? slot.kernel : 'op_unknown';
+    if (!kernelIndex.has(name)) {
+      kernelIndex.set(name, kernelNames.length);
+      kernelNames.push(name);
+    }
+  }
+
+  // Also register kernels for terminal slots (they're already in allEntries, but double-check).
+  // (terminals reference slot_ids which are all in allEntries, so no extra work needed.)
+
+  // Buffer id -> index (already sequential from lowerer, but use explicit map).
+  const bufIndex = new Map(graph.buffers.map((b, i) => [b.id, i]));
+
+  // Original slot id -> walk-order index (for in_ref and terminal resolution).
+  // SPEC: C runtime indexes into its slot array by walk-order; in_refs carry walk-order.
+  const walkOrderOf = new Map(allEntries.map((e, i) => [e.slotId, i]));
+
+  // ---- Write ----
+  const w = new Writer();
+
+  // HEADER (16 bytes).
+  for (const b of MAGIC) w.u8(b);
+  w.u16(VERSION);
+  w.u16(0); // flags (reserved)
+  w.u16(allEntries.length);  // slot_count
+  w.u16(0);                  // reserved
+  w.u16(0);                  // reserved
+  w.u8(graph.buffers.length); // buffer_count
+  w.u8(graph.terminals.length); // terminal_count
+  w.u8(kernelNames.length);   // kernel_id_count
+  w.u8(0); // reserved
+
+  // KERNEL REGISTRY.
+  for (const name of kernelNames) {
+    const encoded = Array.from(name).map(c => c.charCodeAt(0));
+    w.u8(encoded.length);
+    for (const b of encoded) w.u8(b);
+  }
+
+  function writeSlotRecord(entry) {
+    const slot = slotMap.get(entry.slotId);
+    if (!slot) throw new Error(`slot ${entry.slotId} not found in graph`);
+    const kid = kernelIndex.get(slot.kernel) ?? 0;
+    const core = entry.core;
+    const ins = slot.in || [];
+
+    w.u8(kid);
+    w.u8(core);
+    w.u8(ins.length);
+
+    for (const ref of ins) {
+      if (ref.kind === 'slot') {
+        w.u8(ref.read ? TAG_SLOT_OUT2 : TAG_SLOT);
+        w.u16(walkOrderOf.get(ref.id) ?? 0); /* walk-order index, not original slot id */
+      } else if (ref.kind === 'buffer') {
+        w.u8(TAG_BUFFER);
+        w.u16(bufIndex.get(ref.id) ?? 0);
+      } else if (ref.kind === 'const') {
+        const v = Math.round(ref.value); /* the const pool is int32 */
+        if (v >= 0 && v <= 255) {
+          w.u8(TAG_CONST_U8);
+          w.u8(v);
+        } else {
+          w.u8(TAG_CONST_I32);
+          w.i32(v);
+        }
+      }
+    }
+
+    w.u16(0); /* out_offset: runtime computes from sizeof; write 0 */
+    const [p0, p1] = encodeParams(slot.params);
+    if (p1 !== 0) throw new Error(`${slot.kernel}: param1 is retired; structural data must fit param0`);
+    w.u32(p0);
+  }
+
+  // SLOT TABLE: every slot in walk order.
+  for (const entry of allEntries) writeSlotRecord(entry);
+
+  // BUFFER TABLE.
+  for (const buf of graph.buffers) {
+    w.u8(BUF_KINDS[buf.kind] ?? 0);
+    w.u32(buf.length); // SPEC: u32 to handle audio buffers > 65535 cells
+    const hasSeed = buf.seed && buf.seed.length > 0 ? 1 : 0;
+    w.u8(hasSeed);
+    if (hasSeed) {
+      for (let i = 0; i < buf.length; i++) {
+        w.u16(buf.seed[i] ?? 0);
+      }
+    }
+  }
+
+  // TERMINAL TABLE.
+  for (const term of graph.terminals) {
+    w.u8(JACK_IDS[term.jack] ?? 0);
+    w.u16(walkOrderOf.get(term.slotId) ?? 0); /* walk-order index */
+    w.u8(term.mode ?? 0);                      /* 0=raw, 1=v/oct pitch (cv-out) */
+  }
+
+  // CRC32.
+  const body = w.bytes();
+  const crc = crc32(body);
+  w.u32(crc);
+
+  // Pool validation: reject patches that exceed static pool limits.
+  const slotCount = allEntries.length;
+  if (slotCount > LENS_MAX_SLOTS)
+    throw new Error(`patch exceeds LENS_MAX_SLOTS (used ${slotCount}, limit ${LENS_MAX_SLOTS})`);
+  if (graph.buffers.length > LENS_MAX_BUFFERS)
+    throw new Error(`patch exceeds LENS_MAX_BUFFERS (used ${graph.buffers.length}, limit ${LENS_MAX_BUFFERS})`);
+  if (graph.terminals.length > LENS_MAX_TERMINALS)
+    throw new Error(`patch exceeds LENS_MAX_TERMINALS (used ${graph.terminals.length}, limit ${LENS_MAX_TERMINALS})`);
+  let audioBytes = 0, controlBytes = 0, constCount = 0;
+  for (const buf of graph.buffers) {
+    /* 12-bit packed: 2 cells per 3 bytes; round up. */
+    const bytesPacked = (buf.length * 3 + 1) >> 1;
+    if (buf.kind === 'audio') audioBytes += bytesPacked;
+    else controlBytes += bytesPacked;
+  }
+  for (const entry of allEntries) {
+    const slot = slotMap.get(entry.slotId);
+    if (slot) {
+      for (const ref of (slot.in || [])) if (ref.kind === 'const') constCount++;
+    }
+  }
+  if (audioBytes > LENS_AUDIO_BUFFER_BYTES)
+    throw new Error(`patch exceeds LENS_AUDIO_BUFFER_BYTES (used ${audioBytes}, limit ${LENS_AUDIO_BUFFER_BYTES})`);
+  if (controlBytes > LENS_CONTROL_BUFFER_BYTES)
+    throw new Error(`patch exceeds LENS_CONTROL_BUFFER_BYTES (used ${controlBytes}, limit ${LENS_CONTROL_BUFFER_BYTES})`);
+  if (constCount > LENS_CONST_POOL_WORDS)
+    throw new Error(`patch exceeds LENS_CONST_POOL_WORDS (used ${constCount}, limit ${LENS_CONST_POOL_WORDS})`);
+
+  return w.bytes();
+}
+
+// ---- Decoder ----
+function decode(bytes) {
+  const r = new Reader(bytes);
+
+  // HEADER.
+  const magic = [r.u8(), r.u8(), r.u8(), r.u8(), r.u8()];
+  if (!MAGIC.every((b, i) => magic[i] === b)) throw new Error(`bad magic: ${JSON.stringify(magic)}`);
+  const version = r.u16();
+  if (version !== VERSION) throw new Error(`version mismatch: got ${version}, want ${VERSION}`);
+  r.u16(); // flags
+  const slot_count = r.u16();
+  r.u16(); // reserved
+  r.u16(); // reserved
+  const buffer_count = r.u8();
+  const terminal_count = r.u8();
+  const kernel_id_count = r.u8();
+  r.u8(); // reserved
+
+  // KERNEL REGISTRY.
+  const kernelNames = [];
+  for (let i = 0; i < kernel_id_count; i++) {
+    const len = r.u8();
+    kernelNames.push(r.str(len));
+  }
+
+  // SLOT TABLE: flat list of slot_count records in walk order.
+  function readSlotRecord(walkIdx) {
+    const kid = r.u8();
+    const core = r.u8();
+    const in_count = r.u8();
+
+    const ins = [];
+    for (let j = 0; j < in_count; j++) {
+      const tag = r.u8();
+      if (tag === TAG_SLOT) {
+        ins.push({ kind: 'slot', id: r.u16() });
+      } else if (tag === TAG_SLOT_OUT2) {
+        ins.push({ kind: 'slot', id: r.u16(), read: 'out2' });
+      } else if (tag === TAG_BUFFER) {
+        ins.push({ kind: 'buffer', id: r.u16() });
+      } else if (tag === TAG_CONST_U8) {
+        ins.push({ kind: 'const', value: r.u8() });
+      } else if (tag === TAG_CONST_I32) {
+        ins.push({ kind: 'const', value: r.i32() });
+      } else {
+        throw new Error(`unknown in_ref tag ${tag}`);
+      }
+    }
+
+    const out_offset = r.u16();
+    const param0 = r.u32();
+
+    const kernel = kernelNames[kid] ?? 'op_unknown';
+    return {
+      slotId: walkIdx, // walk-order index (not original slot id)
+      kernel,
+      core,
+      in: ins,
+      out_offset,
+      param0,
+    };
+  }
+
+  const sampleRate = [];
+  let walkIdx = 0;
+  for (let i = 0; i < slot_count; i++) {
+    sampleRate.push(readSlotRecord(walkIdx++));
+  }
+
+  // BUFFER TABLE.
+  const buffers = [];
+  for (let i = 0; i < buffer_count; i++) {
+    const kindByte = r.u8();
+    const length = r.u32();
+    const hasSeed = r.u8();
+    const buf = { id: i, kind: BUF_KIND_NAMES[kindByte] ?? 'tape', length };
+    if (hasSeed) {
+      const seed = [];
+      for (let j = 0; j < length; j++) seed.push(r.u16());
+      buf.seed = seed;
+    }
+    buffers.push(buf);
+  }
+
+  // TERMINAL TABLE.
+  const terminals = [];
+  for (let i = 0; i < terminal_count; i++) {
+    const jackId = r.u8();
+    const slotId = r.u16();
+    const mode   = r.u8();
+    terminals.push({ jack: JACK_NAMES[jackId] ?? `jack-${jackId}`, slotId, mode });
+  }
+
+  // CRC32.
+  const bodyLen = r.pos();
+  const storedCrc = r.u32();
+  const computedCrc = crc32(bytes.slice(0, bodyLen));
+  if (storedCrc !== computedCrc) {
+    throw new Error(`CRC mismatch: stored 0x${storedCrc.toString(16)}, computed 0x${computedCrc.toString(16)}`);
+  }
+
+  return {
+    sampleRate,
+    buffers,
+    terminals,
+    _kernelNames: kernelNames,
+  };
+}
+
+module.exports = { encode, decode, MAGIC, VERSION, JACK_IDS, JACK_NAMES, TAG_SLOT, TAG_BUFFER, TAG_CONST_U8, TAG_CONST_I32, BUF_KINDS, crc32 };
+
+});
+__def("validate.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+const { read } = require('./reader.js');
+
+const REPO = path.resolve(__dirname, '..');
+
+// Internal kernels legitimately present in impl but not declared in prelude.
+const KNOWN_INTERNAL = new Set([
+  // op_edge is the canonical rising-edge kernel; trig lowers to it.
+  // op_trig entry remains in the C KTABLE for backward snapshot compatibility.
+  'op_edge', 'op_trig',
+  // terminal writes
+  'op_terminal_write_audio_out_1', 'op_terminal_write_audio_out_2',
+  'op_terminal_write_cv_out_1',    'op_terminal_write_cv_out_2',
+  'op_terminal_write_pulse_out_1', 'op_terminal_write_pulse_out_2',
+  'op_terminal_write_led_0', 'op_terminal_write_led_1', 'op_terminal_write_led_2',
+  'op_terminal_write_led_3', 'op_terminal_write_led_4', 'op_terminal_write_led_5',
+  // recordhead variants
+  'op_recordhead_per_sample', 'op_recordhead_per_cell', 'op_recordhead_gated',
+  'op_recordhead_len_capped', 'op_recordhead_len_capped_gated',
+  // wave variants
+  'op_wave', 'op_wave_drumrack',
+  // variadic-collapsed binary ops
+  'op_mix2', 'op_add2', 'op_mul2', 'op_and2', 'op_or2',
+  // :sat saturating arithmetic variants of add/sub
+  'op_add_sat', 'op_sub_sat',
+  // structural / synthetic
+  'op_connected', 'op_stub', 'op_morph',
+]);
+
+// Collect names of primitive fns in prelude: (def NAME (fn (...) <meta-only body>)).
+function collectPreludePrimitives(preludeText) {
+  const ast  = read(preludeText);
+  const out  = [];
+  for (const form of ast) {
+    if (form.t !== 'list' || form.items.length < 3) continue;
+    if (form.items[0].t !== 'sym' || form.items[0].s !== 'def') continue;
+    const nameNode  = form.items[1];
+    if (nameNode.t !== 'sym') continue;
+    const valueNode = form.items[2];
+    if (valueNode.t !== 'list' || valueNode.items.length === 0) continue;
+    const head = valueNode.items[0];
+    if (head.t !== 'sym' || head.s !== 'fn') continue;
+    // body starts at index 2 (after fn + params list).
+    const body = valueNode.items.slice(2);
+    // Primitive: body is empty OR consists only of kw/value meta pairs.
+    let isPrim = true;
+    let i = 0;
+    while (i < body.length) {
+      const f = body[i];
+      if (f.t === 'kw') {
+        i++;
+        if (i < body.length && body[i].t !== 'kw') i++;
+        continue;
+      }
+      isPrim = false;
+      break;
+    }
+    if (isPrim) out.push(nameNode.s);
+  }
+  return out;
+}
+
+// Collect kernel names from the C KTABLE in runtime.c.
+function collectCKernels() {
+  const text    = fs.readFileSync(path.join(__dirname, '..', 'runtime/runtime.c'), 'utf8');
+  const matches = [...text.matchAll(/"(op_\w+)"/g)];
+  return [...new Set(matches.map(m => m[1]))];
+}
+
+// Prelude verbs the expander rewrites to other kernels, so they have no backing
+// op_ of their own. groove -> mix of drum voices.
+const EXPANDER_SUGAR = new Set(['groove']);
+
+// Prelude primitives that lower to a kernel with a different name.
+// trig (a clock's beat) lowers to op_fall (the ramp's wrap); edge is the rising kernel.
+const KERNEL_OVERRIDE = { trig: 'op_fall' };
+
+// Convert a prelude name like 'v-oct' -> 'op_v_oct'.
+function primToKernel(name) {
+  if (KERNEL_OVERRIDE[name]) return KERNEL_OVERRIDE[name];
+  return 'op_' + name.replace(/-/g, '_');
+}
+
+function validatePreludeKernels() {
+  const preludeText = fs.readFileSync(path.join(REPO, 'prelude.loupe'), 'utf8');
+  const primitives  = collectPreludePrimitives(preludeText);
+  const cKernels    = new Set(collectCKernels());
+
+  const expectedKernels = primitives
+    .filter(p => !EXPANDER_SUGAR.has(p))
+    .map(primToKernel);
+
+  const missingC  = expectedKernels.filter(k => !cKernels.has(k));
+  const extraC    = [...cKernels].filter(k => !expectedKernels.includes(k) && !KNOWN_INTERNAL.has(k));
+
+  return { primitives, expectedKernels, cKernels: [...cKernels], missingC, extraC };
+}
+
+module.exports = { validatePreludeKernels, collectPreludePrimitives };
+
+// CLI: node compiler/validate.js
+if (require.main === module) {
+  const v = validatePreludeKernels();
+  console.log(`prelude primitives : ${v.primitives.length}`);
+  console.log(`C runtime kernels  : ${v.cKernels.length}`);
+  const ok = !v.missingC.length && !v.extraC.length;
+  if (v.missingC.length)  console.error('MISSING from C runtime:\n' + v.missingC.map(k => '  ' + k).join('\n'));
+  if (v.extraC.length)    console.warn('EXTRA in C  (not in prelude, not KNOWN_INTERNAL):\n' + v.extraC.map(k => '  ' + k).join('\n'));
+  if (ok) console.log('ok: no drift');
+  process.exit(ok ? 0 : 1);
+}
+
+});
+__def("sysex.js", function (module, exports, require) {
+const __dirname = '', __filename = '';
+// sysex.js: SysEx wire layer (8-into-7 packing + framing). Mirrors lens_sysex.cpp/.h.
+'use strict';
+
+const MFR = [0x7D, 0x4C, 0x45];   // educational manufacturer id + 'L' 'E'
+
+const CMD = {
+  READ_STATE:      0x01,
+  WRITE_STATE:     0x02,
+  SAVE_STATE:      0x03,
+  FACTORY_RESET:   0x04,
+  PING:            0x05,
+  READ_PERF:       0x06,
+  DIAG:            0x07,
+  SLOT_PERF:       0x08,
+  STATE_DUMP:      0x10,
+  PERF_DUMP:       0x11,
+  DIAG_DUMP:       0x12,
+  SLOT_PERF_DUMP:  0x13,
+  ACK:             0x7F,
+  NACK:            0x7E,
+};
+
+// 8-into-7: groups of up to 7 bytes -> 1 MSB byte + 7 low-bit bytes.
+function pack78(raw) {
+  const out = [];
+  for (let i = 0; i < raw.length; i += 7) {
+    const group = raw.slice(i, i + 7);
+    let msb = 0;
+    for (let k = 0; k < group.length; k++) if (group[k] & 0x80) msb |= (1 << k);
+    out.push(msb);
+    for (let k = 0; k < group.length; k++) out.push(group[k] & 0x7F);
+  }
+  return Uint8Array.from(out);
+}
+
+function unpack78(p) {
+  const out = [];
+  let i = 0;
+  while (i < p.length) {
+    const msb = p[i++];
+    const group = Math.min(7, p.length - i);
+    for (let k = 0; k < group; k++) {
+      let b = p[i + k] & 0x7F;
+      if (msb & (1 << k)) b |= 0x80;
+      out.push(b);
+    }
+    i += group;
+  }
+  return Uint8Array.from(out);
+}
+
+// F0 7D 4C 45 <cmd> <packed payload> F7.
+function frame(cmd, rawPayload) {
+  const packed = rawPayload && rawPayload.length ? pack78(rawPayload) : [];
+  return Uint8Array.from([0xF0, ...MFR, cmd, ...packed, 0xF7]);
+}
+
+// Returns { cmd, payload } (unpacked) or null.
+function parse(msg) {
+  if (msg.length < 6 || msg[0] !== 0xF0 || msg[msg.length - 1] !== 0xF7) return null;
+  if (msg[1] !== MFR[0] || msg[2] !== MFR[1] || msg[3] !== MFR[2]) return null;
+  const cmd = msg[4];
+  const packed = msg.slice(5, msg.length - 1);
+  return { cmd, payload: unpack78(packed) };
+}
+
+module.exports = { MFR, CMD, pack78, unpack78, frame, parse };
+
+});
+const Lens = Object.assign(
+  {},
+  __req("reader.js"),
+  __req("expander.js"),
+  __req("lowerer.js"),
+  __req("scheduler.js"),
+  __req("snapshot.js"),
+  __req("validate.js"),
+  __req("sysex.js")
+);
+</script>
+<script>const EXAMPLES = {"discreet-system":"; after Eno's Discreet Music, though the similarity mostly stops at the name ;)\n; two scored melodic lines sent to external oscillators and slopes; their audio returns\n; are summed through a feedback delay.\n;   cv-out 1/2 = pitch     pulse-out 1/2 = trigger     audio-in 1/2 = voices back\n;   audio-out 1/2 = dry voice + echo     knob-main = feedback     knob-x = tempo     knob-y = voice 2 drift\n;   patch: cv-out 1/2 -> SineSquare 1/2 v/oct; pulse-out 1/2 -> Slope 1/2 trig;\n;          Slope 1/2 -> audio-in 1/2 (so the voices return for the feedback delay);\n;          audio-out 1/2 -> Mix.\n(patch\n  (def feedback (knob :main))\n  (def tempo    (knob :x))\n  (def drift    (bipolar (knob :y)))                    ; noon = locked; either side drifts the voices apart\n  (def master (clock :tempo tempo))\n  (def b2     (follow master :mult 1 :drift drift))\n\n  ; _ = hold, ~ = rest\n  (def t1 (score '(Eb5 _  F5 _ _ ~ ~ ~   C5 Ab4 _ _ ~ ~ ~ ~\n                   Eb4 _ _ _ ~ ~ ~ ~   Ab4 _ _ ~ ~ ~ ~ ~)))\n  (def t2 (score '(Db5 Eb5 _ _ ~ ~ ~ ~   F4 _ _ _ ~ ~ ~ ~\n                   Ab4 _ _ ~ ~ ~ ~ ~   F5 Ab5 Bb5 Ab5 _ ~ ~ ~)))\n\n  (def delaybuf (audio :seconds 1.7))\n  (def echo (tap delaybuf :amount VMAX :span))   ; fixed full-length delay, no glide\n\n  (<- (cv-out :1 :v-oct) (step (t1 :notes) :trig master))\n  (<- (pulse-out :1) (onsets (t1 :rhythm) :trig master))\n  (<- (cv-out :2 :v-oct) (step (t2 :notes) :trig b2))\n  (<- (pulse-out :2) (onsets (t2 :rhythm) :trig b2))\n\n  ; sum the dry voices with the attenuated echo, low-pass, then soft-clip into the\n  ; audio range before writing. the delay buffer is signed 12-bit and its write wraps\n  ; (not clamps), so an over-range value would flip polarity and crackle; saturate\n  ; keeps the feedback loop in range with a tape-like knee instead.\n  (def wet (lpf :in (add (mix (audio-in :1) (audio-in :2))\n                         (vca echo feedback))\n                :cut 1200))\n  (<- delaybuf (saturate wet) :per-sample)\n\n  (<- (audio-out :1) (mix (audio-in :1) echo))\n  (<- (audio-out :2) (mix (audio-in :2) echo)))\n","drum-kit":"; a 4-voice drum kit (kick / tom / snare / hat) built natively in loupe.\n;   switch-z up     = beat at clock rate (clocked by pulse-in 1, or internal tempo if unpatched)\n;   switch-z down   = STUTTER: beat rolls at 4x while held\n;   knob-main = wavefold distortion     knob-x = tempo (used when pulse-in-1 unpatched)\n;   audio-out 1/2 = mixed kit (same on both)\n\n(def tone-drum (fn (:trig :pitch :sweep :decay => :out)\n  (def amp  (envelope :trig trig :decay decay))\n  (def bend (spread (envelope :trig trig :decay (div decay 3)) sweep))   ; pitch envelope is 3x faster\n  (<- out (vca (sine (add pitch bend)) amp))))\n\n(def noise-drum (fn (:trig :cut :decay => :out)\n  ; noise band: high-pass roar shaped by a low-pass to leave a usable band.\n  (<- out (vca (lpf :in (hpf :in (noise) :cut (div cut 2))\n                    :cut cut)\n               (envelope :trig trig :decay decay)))))\n\n(patch\n  (def master  (clock :bpm 200))\n  (def clk     (normal (pulse-in :1) master))\n  (def beatclk (if (eq (switch :z) VMIN) (follow clk :mult 4) clk))\n\n  (def kick-beat  (beat '(x . . . x . . .)))   ; four-on-the-floor\n  (def snare-beat (beat '(. . x . . . x .)))   ; backbeat\n  (def hat-beat   (beat '(x . x . x . x .)))   ; eighths\n  (def tom-beat   (beat '(. . . . . . x .)))   ; fill on 7\n\n  (def kick-t  (onsets kick-beat  beatclk))\n  (def tom-t   (onsets tom-beat   beatclk))\n  (def snare-t (onsets snare-beat beatclk))\n  (def hat-t   (onsets hat-beat   beatclk))\n\n  (def kick  (tone-drum  kick-t  Ab2 60 10))\n  (def tom   (tone-drum  tom-t   G3  36 10))\n  (def snare (noise-drum snare-t 800  5))\n  (def hat   (noise-drum hat-t   4000 1))\n\n  (<- (audio-out :1) (wavefold (mix kick snare tom hat) (knob :main)))\n  (<- (audio-out :2) (wavefold (mix kick snare tom hat) (knob :main)))\n  (<- (led :0) (onsets kick-beat beatclk)))\n","drum-machine":"; two drum kits (straight and latin) A/B'd live by the Z-switch, using the groove DSL.\n;   knob-main = tempo     knob-x = kick drive (clean..punchy)     knob-y = hat decay (tight..open)\n;   switch-z  = up = LATIN,  middle/down = STRAIGHT     audio-out 1/2 = kit (mono)\n;   patch: audio-out-1 -> Mix. nothing external needed; drums are internal.\n;\n; named rhythms: four-on-floor backbeat eighths offbeat sixteenths downbeat\n;                tresillo cinquillo habanera son-clave rumba-clave bossa\n; or roll your own: (beat x..x..x.) or (euclid pulses steps)\n\n(patch\n  (def tempo (knob :main :default 2600))\n  (def punch (knob :x :default 2800))\n  (def open  (knob :y :default 1300))\n  (def clk   (clock :tempo tempo))\n\n  ; a straight backbeat kit\n  (def straight\n    (groove :trig clk\n      (kick  :on four-on-floor :note A1 :drive punch :sweep 3700 :decay 1500)\n      (snare :on backbeat      :note C3 :snappy 3600 :tone 2800  :decay 1350)\n      (hat   :on eighths       :note A5 :tone 3200   :decay open)))\n\n  ; a latin kit\n  (def latin\n    (groove :trig clk\n      (kick  :on son-clave      :note A1 :drive punch :sweep 3500 :decay 1800)\n      (snare :on tresillo       :note C3 :snappy 2200 :tone 2600  :decay 1250)\n      (hat   :on (euclid 11 16) :note A5 :tone 3400   :decay open)))\n\n  (def kit (if (eq (switch :z) VMAX) latin straight))\n  (<- (audio-out :1) kit)\n  (<- (audio-out :2) kit)\n  (<- (led :0) (hits four-on-floor clk)))\n","fm-drum":"; 2-operator FM drum. Carrier body + modulator colour.\n; Modelled on the Erica MKI FM drum: three modes, two voices, one switch.\n;   z-switch down/middle/up = kick / tom / cymbal-cowbell character\n;   knob-main = pitch within mode (each mode centres on a different OCTAVE)\n;   knob-x    = FM ratio (within the mode's ratio range)\n;   knob-y    = decay\n;   pulse-in-1 = trigger (else falls back to four-on-floor)\n;   cv-bi-1    = pitch CV, +/- 2 octaves\n;   cv-uni-1   = FM-depth modulation (LFO sweep timbre under external control)\n(patch\n  (def trig (normal (pulse-in :1) (onsets four-on-floor)))\n\n  ; ---- modes: three presets indexed by the Z-switch position ----\n  ; down(0) = kick   middle(1) = tom   up(2) = cymbal\n  ; (switch :z) reads rails (VMIN/VMID/VMAX); squint spreads them across each list.\n  (def mode (switch :z))\n  (def mode-root  (squint '(C1 C3 C4) mode))   ; base pitch (cymbal lower for FM headroom)\n  (def mode-ratio (squint '(0 19 34)  mode))   ; modulator offset in semitones (~FM ratio 1:3:7)\n  (def mode-decay (squint '(800 600 1500) mode))   ; kick / tom / cymbal base decay\n\n  ; ---- pitch: mode root + knob sweep + bipolar CV (+/- 2 octaves) ----\n  (def c-note (add mode-root\n                   (add (spread (knob :main) OCTAVE)\n                        (div (cv-in :1 :bipolar) (div VMID (mul OCTAVE 2))))))\n\n  ; ---- FM ratio: modulator sits mode-ratio semitones above the carrier; knob-x bends\n  ; it +/- one octave. Kept in MIDI range so the sweep always has effect (incl. cymbal). ----\n  (def m-note  (add c-note (add mode-ratio (sub (spread (knob :x) 24) 12))))\n\n  ; ---- decay: mode scale + knob-y scaling ----\n  (def decay   (add mode-decay (spread (knob :y) 3000)))\n\n  (def mod-env  (envelope :trig trig :decay (div decay 3)))\n  ; FM index = how deep the modulator drives the carrier's phase: bright on attack\n  ; (mod-env), decaying to a clean tone. cv-in 1 is bipolar so an unpatched jack adds\n  ; nothing; patch a CV to sweep the timbre. Scaling the MODULATOR sets the index;\n  ; carrier amplitude is the amp-env on the vca, so the output stays in range.\n  (def fm-index (add mod-env (cv-in :1 :bipolar)))\n\n  (def amp-env  (envelope :trig trig :decay decay))\n  (def carrier  (sine c-note :pm (vca (sine m-note) fm-index)))\n\n  (<- (audio-out :1) (vca carrier amp-env))\n  (<- (audio-out :2) (vca carrier amp-env))\n  (<- (pulse-out :1) trig))\n","hello-lfo":"; a sine with knob-controlled pitch, vibrato depth, and vibrato speed.\n;   knob-main = pitch (C3 to B4, 24 semitones)\n;   knob-x    = vibrato depth (CCW = none, CW = wide)\n;   knob-y    = vibrato speed (~0 to ~30 Hz)\n;   audio-out-1 = sine + vibrato\n;\n; :hz X accepts a literal Hz value or a stream. A streamed :hz reads the value\n; directly as Hz, so (spread knob-y 30) gives 0..29 Hz across the knob's travel.\n(patch\n  (def pitch (add C3 (spread (knob :main) 24)))\n  (<- (audio-out :1) (sine pitch :pm (sine :hz (spread (knob :y) 30)) :depth (knob :x))))\n","hello-seq":"; a 4-note minor arpeggio stepping once per master tick.\n;   knob-x = tempo     audio-out-1 = arpeggio voice\n;   cv-out-1 = pitch     pulse-out-1 = trigger\n(patch\n  (def master (clock :tempo (knob :x)))\n  (def melody (tape '(C3 Eb3 G3 Bb3)))\n\n  (def voice  (step melody))\n  (<- (cv-out :1 :v-oct) voice)\n  (<- (pulse-out :1) (trig))\n  (<- (audio-out :1) (sine voice)))\n","hello":"; one sine, main knob picks the pitch across two octaves starting at C3.\n;   knob-main = pitch (C3 to B4)     audio-out-1 = sine\n;\n; (spread knob-main 24) divides the knob into 24 semitone buckets. Each bucket\n; is about 170 ADC units wide, comfortably outside the framework's knob jitter,\n; so the pitch sits stably on each semitone. C3 env-resolves to MIDI 48;\n; the positional pitch on sine is in MIDI domain (no auto-spread).\n(patch\n  (<- (audio-out :1) (sine (add C3 (spread (knob :main) 24)))))\n","just-a-kick":"; a dedicated kick drum module with full CV and knob control.\n;   knob-main = decay (cv-bi-2 adds)     knob-x = drive     knob-y = pitch sweep\n;   switch-z  = OCTAVE (down = C1, middle = C2, up = C3)\n;   cv-bi-1   = pitch offset (+-12 semitones)     pulse-in-1 or pulse-in-2 = trigger\n;   audio-out 1/2 = kick (mono)     cv-out-1 = pitch as v/oct\n;   cv-out-2  = inverted amp envelope (for sidechaining: high at rest, dips on kick)\n;   pulse-out-1 = trigger thru     pulse-out-2 = /2 of trigger\n;   patch: pulse-in-1 <- a clock (e.g. 4-voltages or another pulse source);\n;          audio-out-1 -> Mix; cv-out-2 -> VCA on a bass you want to duck under the kick.\n(patch\n  (def OCTAVE-base (squint '(C1 C2 C3) (switch :z)))   ; switch pos down/mid/up = C1/C2/C3\n  (def pitch       (add OCTAVE-base (spread (cv-in :1 :bipolar) OCTAVE)))  ; +-12 semis\n  (def decay       (add (knob :main) (cv-in :2 :bipolar) :sat))\n  (def drive       (knob :x))\n  (def sweep       (knob :y))\n  (def clk-fall (normal (pulse-in :1) (onsets four-on-floor)))\n  (def trig     (or clk-fall (pulse-in :2)))\n\n  (def voice (kick :midi pitch :decay decay :drive drive :sweep sweep :trig trig))\n\n  (def amp     (envelope :trig trig :decay decay))\n  (def ducker  (sub VMAX amp))\n\n  (<- (audio-out :1) voice)\n  (<- (audio-out :2) voice)\n  (<- (cv-out :1 :v-oct) pitch)\n  (<- (cv-out :2)    ducker)\n  (<- (pulse-out :1) trig)\n  (<- (pulse-out :2) (toggle trig)))\n","meta-turing-machine":"; like turing-machine.loupe but hunts the transformations applied to a fixed tune, not the notes.\n;   knob-main = program mutation rate     knob-x = tempo     knob-y = tune mutation rate\n;   switch up = voice 2 drifts against voice 1 (phasing); down/mid = locked\n;   cv-out 1/2 = plain tune / transformed     pulse-out 1/2 = trigger\n;   patch: cv-out 1/2 -> SineSquare 1/2 v/oct; pulse-out 1/2 -> Slope 1/2 trig;\n;          Slope 1/2 -> Mix. audio-out 1/2 carry bench sines as a dry monitor.\n\n; the four ops; each maps a note to a note\n(def same  (fn (:n) n))\n(def up   (fn (:n) (transpose n 12)))\n(def flip  (fn (:n) (sub 120 n)))\n(def down (fn (:n) (transpose n -12)))\n(def ops   (lens same up flip down))        ; a lens turns byte k on a tape into op k\n\n(patch\n  (def master (clock :tempo (knob :x)))\n  (def bar    (follow master :div 4))\n  (def drift  (follow master :mult 15 :div 16))   ; voice-2 tune clock, 1 beat slower per 16: phases in/out\n  (def tune (tape '(C4 E4 G4 B4)))\n  (def prog (tape ops '(same up flip down)))\n\n  ; keep-or-replace: rewrite the program tape each bar, the tune each beat\n  (<- prog (if (chance (knob :main) :trig bar) (step prog :trig bar) (random :trig bar)) :trig bar)\n  (<- tune (if (chance (knob :y)) (step tune) (snap (add C3 (spread (random) 25)) :scale minor)))\n\n  (def v1     (step tune))\n  ; voice 2 = the program transform applied to a note. switch up: read the tune on the\n  ; slow drift clock so the voices slide in/out of phase; else the locked v1. Select the\n  ; NOTE (cheap) so there is a single transform chain, not one per branch.\n  (def v2note (if (gt (switch :z) VMID) (step tune :trig drift) v1))\n  (def v2     ((thru ops (step prog :trig bar)) v2note))\n  (def trig (trig master))\n  (<- (cv-out :1 :v-oct) v1)\n  (<- (cv-out :2 :v-oct) v2)\n  (<- (pulse-out :1) trig)\n  (<- (pulse-out :2) trig)\n  ; bench-monitor sines so audio-out 1/2 carry the two voices dry when no external V/oct is wired.\n  (<- (audio-out :1) (sine v1))\n  (<- (audio-out :2) (sine v2))\n  (<- (led :0)       (step prog :trig bar))   ; show current op index directly\n  (<- (led :5)       (envelope :trig trig :decay 500)))   ; tempo blink\n","rungler":"; benjolin (after rob hordijk): two oscillators cross-modulate through a rungler.\n; the rungler is a shift register clocked by osc2, fed osc1's comparator bit XORed\n; back on itself (a nonlinear feedback shift register). its stepped voltage is the\n; CV that re-tunes both oscillators, so the whole thing chases its own tail.\n; for the full rungler sound, run audio-out-1 into the workshop filter with the rungle\n; (cv-out-1) on its cutoff, then add a touch of FM and resonance: that filtered, resonant\n; sweep is where it really sings.\n;   knob-x = osc1 pitch (the audible voice)\n;   knob-y = osc2 pitch = rungler CLOCK rate (turn down for a slow stepped sequence, up for audio-rate chaos)\n;   knob-main = rungler amount (0 = stable drone, up = the rungle sweeps the pitches into chaos)\n;   switch up = freeze the rungler: the current pattern locks into a repeating loop\n; jacks (patch into the workshop filter):\n;   audio-out-1 = both oscs mixed     -> filter audio in\n;   cv-out-1    = rungle voltage (stepped)  -> filter cutoff (add resonance + a little FM)\n;   cv-out-2    = rungle voltage (smoothed) -> filter cutoff for gliding sweeps instead\n;   audio-out-2 = osc1 alone          -> filter the oscillators separately, or use as a mod source\n;   pulse-out-1 = rungler clock (osc2 edges) -> sync the rest of the system\n;   audio-in-1  = optional analog feedback: patch the filter out back here and it joins the\n;                 rungler's data, folding the analog filter into the digital chaos (inert if unpatched)\n(patch\n  (def amount (spread (knob :main) 13))              ; rungler depth: 0..12 semitones per rungle level\n  (def p1 (add 30 (spread (knob :x) 49)))            ; osc1 pitch: notes 30..78 (the audible voice)\n  (def p2 (spread (knob :y) 73))                     ; osc2 = clock: notes 0..72 (~8 Hz slow .. ~660 Hz audio)\n\n  ; the rungler register, seeded so it never starts on a fixed point\n  (def reg (tape '(0 1 1 0 1 0 0 1)))\n\n  ; rungler DAC: the three most-recent stages, binary weighted (0..7), scaled to full scale\n  (def rungle3 (add (add (mul (tap reg :amount 1) 4)\n                         (mul (tap reg :amount 2) 2))\n                    (tap reg :amount 3)))\n  (def rungle  (div (mul rungle3 VMAX) 7))           ; 0..7 -> VMIN..VMAX\n\n  ; the rungle voltage is the CV that drives both oscillators' pitch (independent base pitches)\n  (def fm (mul rungle3 amount))\n  (def pitch1 (add p1 fm))\n  (def pitch2 (add p2 fm))\n\n  ; one phasor per voice: its ramp drives the rungler timing (comparator + clock) and,\n  ; via :phase, the audio triangles below, so they stay phase-coherent\n  (def o1 (phasor pitch1))                           ; ramp: osc1 comparator source\n  (def o2 (phasor pitch2))                           ; ramp: rungler clock\n\n  ; nonlinear feedback shift register: recirculate the oldest stage, and while running\n  ; XOR in fresh data (osc1 comparator XOR the filter return). switch UP stops the fresh\n  ; data, so the register just loops its 8 bits = the current pattern locks. clocked by osc2.\n  (def c1   (mask (gt o1 VMID) 1))                   ; osc1 ramp split at its midpoint\n  (def fb   (mask (gt (audio-in :1) VMID) 1))        ; filter feedback bit (0 when unpatched)\n  (def lock (mask (gt (switch :z) VMID) 1))          ; switch up = freeze: lock the pattern into a loop\n  (def run  (sub 1 lock))\n  ; din = comparator XOR oldest-stage XOR a tail term. running tail = fb; locked tail = c1,\n  ; which cancels c1 so din = oldest-stage (pure recirculation = the pattern loops). the lock\n  ; rides the fb side so the comparator's feedback path keeps its exact depth (no added z-1).\n  (def din (xor (xor c1 (tap reg :amount 8))\n                (add (mul run fb) (mul lock c1))))\n  (<- reg din :trig o2)\n\n  (<- (audio-out :1) (mix (triangle :phase o1) (triangle :phase o2)))\n  (<- (audio-out :2) (triangle :phase o1))           ; osc1 alone\n  (<- (cv-out :1)    (cv rungle))                    ; rungle voltage, stepped\n  (<- (cv-out :2)    (cv (slew rungle :rate 500)))   ; rungle voltage, smoothed (gliding cutoff)\n  (<- (pulse-out :1) (trig o2))                      ; rungler clock, one pulse per osc2 cycle\n  (<- (led :0)       rungle))\n","turing-machine":"; a loop of notes that slowly rewrites itself; main controls mutation rate.\n;   knob-main = mutation (CW = locked loop, CCW = pure random)\n;   knob-x = tempo (used when pulse-in-1 is unpatched)\n;   knob-y = active length\n;   pulse-in-1 = external clock (patch one in and it takes over from knob-x)\n;   cv-out-1 = pitch     pulse-out-1 = clock trigger\n;   patch: cv-out-1 -> SineSquare v/oct; pulse-out-1 -> Slope trig; Slope -> Mix.\n(patch\n  (def master (normal (pulse-in :1) (clock :tempo (knob :x))))\n  (def loop (tape '(C3 Eb3 G3 Bb3 C4 Bb3 G3 Eb3)))\n\n  ; knob-y picks the active loop length, 1..(len loop) cells: 1 = single-cell\n  ; repeat, full = the whole loop. Spread the knob across the tape's own length.\n  (def length (add 1 (spread (knob :y) (len loop))))\n\n  ; keep the current step, or replace with a random note in a 2-OCTAVE window from C3.\n  ; the window keeps replacements musical; without it snap would clamp to note 127.\n  (<- loop (if (chance (knob :main))\n               (step loop :len length)\n               (snap (add C3 (spread (random) 25)) :scale minor))\n           :len length)\n\n  (<- (cv-out :1 :v-oct) (step loop :len length))\n  (<- (pulse-out :1) (trig))\n  (<- (led :0)       (step loop :len length)))\n","utility-pair":"; example pair: lopass gate on the left half, wavefolder on the right.\n; left = audio/cv/pulse-in 1, knob-x, led-0     right = jacks 2, knob-y, led-3\n;   patch: audio sources -> audio-in 1/2; pulse-in-1 = ping for the lopass gate;\n;          pulse-in-2 + cv-in-2 = trig and drive CV for the wavefolder.\n;          audio-out 1/2 -> Mix.\n; swap either (use ...) for another file from\n; https://github.com/grsr/lens/tree/main/patches/utility-pair\n; to try a different utility. not all of them have been tested.\n(use utility-pair/lopass-gate)\n(use utility-pair/wavefolder)\n(patch\n  (def ping-1 (normal (pulse-in :1) (onsets four-on-floor)))\n  (def ping-2 (normal (pulse-in :2) (onsets four-on-floor)))\n  (<- (audio-out :1) (lopass-gate (audio-in :1) ping-1 (knob :x)))\n  (def wf (wavefolder (audio-in :2) (add (cv-in :2 :bipolar) (knob :y) :sat) ping-2 (add 2 (spread (knob :main) 5))))\n  (<- (audio-out :2) (wf :out))\n  (<- (cv-out :2)    (wf :random))\n  (<- (pulse-out :2) (wf :clock))\n  (<- (led :0) (knob :x))\n  (<- (led :3) (knob :y)))\n"};
+</script>
+<script>// web/app.js — Lens patch loader UI.
+// Inlined by tools/build_web.js after the bundled compiler (global `Lens`)
+// and embedded example patches (global `EXAMPLES`).
+// Requires a secure context for WebMIDI (https or localhost).
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const editor = $("editor"), hl = $("hl"), statusEl = $("status"), picker = $("picker");
+const btnConnect = $("connect"), btnSend = $("send"), btnSaveCard = $("savecard");
+const btnOpen = $("open"), btnSave = $("save"), filePick = $("filepick");
+
+let midiOut = null, midiIn = null, ackWaiter = null;
+let snapshot = null;        // last good compile's bytes
+
+const say = (msg, cls) => { statusEl.textContent = msg; statusEl.className = cls || ""; };
+
+window.addEventListener("error", (e) => say(e.message, "err"));
+
+// ---- syntax highlighting -------------------------------------------------------
+const TOKEN = /(;[^\n]*)|(:[\w?*+-]+)|(\(|\))|(-?\d[\w.]*)|([^\s();]+)|(\s+)/g;
+const escHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+function highlight(src) {
+  let out = "", depth = 0, head = false, m;
+  TOKEN.lastIndex = 0;
+  while ((m = TOKEN.exec(src))) {
+    const [, cmt, kw, paren, num, sym, ws] = m;
+    if (cmt)      { out += '<span class="cmt">' + escHtml(cmt) + "</span>"; head = false; }
+    else if (kw)  { out += '<span class="kw">' + escHtml(kw) + "</span>"; head = false; }
+    else if (paren) {
+      if (paren === "(") { out += '<span class="p' + (depth % 5) + '">(</span>'; depth++; head = true; }
+      else { depth = Math.max(0, depth - 1); out += '<span class="p' + (depth % 5) + '">)</span>'; head = false; }
+    }
+    else if (num) { out += '<span class="num">' + escHtml(num) + "</span>"; head = false; }
+    else if (sym) { out += head ? '<span class="head">' + escHtml(sym) + "</span>" : escHtml(sym); head = false; }
+    else out += ws;
+  }
+  return out + "\n";
+}
+
+function paint() { try { hl.innerHTML = highlight(editor.value); } catch (_) {} }
+const syncScroll = () => { hl.scrollTop = editor.scrollTop; hl.scrollLeft = editor.scrollLeft; };
+
+// (use FILE) loader: fetch patches by URL, cache recursively before compile.
+const useCache = new Map();
+const scanUses = (t) => { const re = /\(\s*use\s+([^\s)]+)/g, out = []; let m; while ((m = re.exec(t))) out.push(m[1]); return out; };
+
+async function pullUses(relpath) {
+  for (const cand of [relpath, relpath + ".loupe"]) {
+    const url = new URL("../" + cand, location.href).href;
+    if (useCache.has(cand)) return;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) continue;
+      const t = await r.text();
+      useCache.set(cand, t);
+      for (const u of scanUses(t)) await pullUses("patches/" + u);
+      return;
+    } catch (_) {}
+  }
+}
+
+// loadFile(relpath): returns text string or null. relpath is repo-root-relative.
+const loadFile = (relpath) => {
+  if (useCache.has(relpath)) return useCache.get(relpath);
+  return null;
+};
+
+async function refresh() {
+  try {
+    const text = editor.value;
+    for (const u of scanUses(text)) await pullUses("patches/" + u);
+    const ast        = Lens.read(text);
+    const expanded   = Lens.expand(ast, { loadFile });
+    const lowered    = Lens.lower(expanded);
+    const scheduled  = Lens.schedule(lowered);
+    snapshot = Lens.encode(scheduled, lowered);
+    const nodeCount = lowered.nodes ? lowered.nodes.length : 0;
+    say(nodeCount + " nodes · " + snapshot.length + " B"
+        + (midiOut ? " · " + midiOut.name : " · not connected"), "ok");
+  } catch (e) {
+    snapshot = null;
+    say(e.message, "err");
+  }
+  btnSend.disabled = btnSaveCard.disabled = !(snapshot && midiOut);
+}
+
+function loadText(text) { editor.value = text; paint(); refresh(); }
+
+// ---- WebMIDI ------------------------------------------------------------------
+async function connect() {
+  if (!navigator.requestMIDIAccess) { say("this browser has no WebMIDI (use Chrome or Edge over http/https, not a file:// page)", "err"); return; }
+  try {
+    const midi = await navigator.requestMIDIAccess({ sysex: true });
+    midiOut = [...midi.outputs.values()].find(p => /lens|workshop|music thing/i.test(p.name)) || null;
+    midiIn  = [...midi.inputs.values()].find(p => /lens|workshop|music thing/i.test(p.name)) || null;
+    if (!midiOut || !midiIn) { say("no card found (looked for a MIDI device matching lens/workshop/music thing)", "err"); return; }
+    midiIn.onmidimessage = (ev) => {
+      const m = Lens.parse([...ev.data]);
+      if (m && ackWaiter) { const w = ackWaiter; ackWaiter = null; w(m); }
+    };
+    btnConnect.textContent = "connected";
+    refresh();
+  } catch (e) { say("midi: " + e.message, "err"); }
+}
+
+const recv = (ms = 1500) => new Promise((res, rej) => {
+  const t = setTimeout(() => { ackWaiter = null; rej(new Error("no reply from the card")); }, ms);
+  ackWaiter = (m) => { clearTimeout(t); res(m); };
+});
+
+async function writePatch() {
+  for (let t = 0; t < 4; t++) {
+    midiOut.send([...Lens.frame(Lens.CMD.WRITE_STATE, snapshot)]);
+    const m = await recv();
+    if (m.cmd === Lens.CMD.ACK) return;
+    if (m.cmd === Lens.CMD.NACK && m.payload[1] === 0x06) { await new Promise(r => setTimeout(r, 150)); continue; }
+    throw new Error("card refused the patch (NACK " + (m.payload[1] || "?") + ")");
+  }
+  throw new Error("card stayed busy");
+}
+
+async function send() {
+  if (!snapshot || !midiOut) return;
+  btnSend.disabled = true;
+  try { await writePatch(); say("sent · playing", "ok"); }
+  catch (e) { say(e.message, "err"); }
+  btnSend.disabled = !(snapshot && midiOut);
+}
+
+async function saveToCard() {
+  if (!snapshot || !midiOut) return;
+  btnSaveCard.disabled = true;
+  try {
+    await writePatch();
+    await new Promise(r => setTimeout(r, 700));
+    midiOut.send([...Lens.frame(Lens.CMD.SAVE_STATE)]);
+    const m = await recv(3000);
+    if (m.cmd !== Lens.CMD.ACK) throw new Error("save refused");
+    say("saved · card is rebooting — reconnect in a moment", "ok");
+    btnConnect.textContent = "connect"; midiOut = midiIn = null;
+  } catch (e) { say(e.message, "err"); }
+  refresh();
+}
+
+// ---- wire up ------------------------------------------------------------------
+let timer = null;
+editor.addEventListener("input", () => { paint(); clearTimeout(timer); timer = setTimeout(refresh, 250); });
+editor.addEventListener("scroll", syncScroll);
+btnConnect.addEventListener("click", connect);
+btnSend.addEventListener("click", send);
+btnSaveCard.addEventListener("click", saveToCard);
+btnOpen.addEventListener("click", () => filePick.click());
+filePick.addEventListener("change", () => {
+  const f = filePick.files[0]; if (!f) return;
+  f.text().then(t => { picker.value = ""; loadText(t); });
+});
+btnSave.addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([editor.value], { type: "text/plain" }));
+  a.download = (picker.value || "patch").replace(/.*\//, "").replace(/\.loupe$/, "") + ".loupe";
+  a.click();
+});
+
+picker.appendChild(new Option("examples…", ""));
+for (const name of Object.keys(EXAMPLES)) picker.appendChild(new Option(name, name));
+picker.addEventListener("change", () => {
+  const text = EXAMPLES[picker.value];
+  if (text !== undefined) loadText(text);
+});
+
+paint();
+refresh();
+</script>

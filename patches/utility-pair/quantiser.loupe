@@ -1,7 +1,8 @@
 ; UTILITY: quantiser — 1V/oct quantiser with built-in S&H, transpose, and live scale select
 ; (knob picks a 12-bit scale mask), plus a trigger when the note changes.
-(def quantiser (fn (:cv :trig :transpose :scale => :out :changed)
-  (def note (snap (transpose (spread (hold cv trig) 60) (spread transpose 24))
-                  :mask (thru :lens scale-masks :at (spread scale 9))))
+; :trans is the transpose amount, named so it does not shadow the transpose op.
+(def quantiser (fn (:cv :trig :trans :scale => :out :changed)
+  (def note (snap (transpose (spread (hold cv trig) 60) (spread trans 24))
+                  :mask (squint scale-masks scale)))
   (<- out (v-oct note))
-  (<- changed (gate (ne note (z1 note)) trig))))
+  (<- changed (edge (ne note (z1 note))))))

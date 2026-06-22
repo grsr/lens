@@ -4,4 +4,4 @@
   (def g (slew h :rate rate))
   (<- held    (cv h))
   (<- glided  (bipolar g))
-  (<- arrived (gate (lt (dist h g) 16) trig))))
+  (<- arrived (edge (lt (dist h g) 16)))))

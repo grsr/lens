@@ -1,17 +1,25 @@
 ; a loop of notes that slowly rewrites itself; main controls mutation rate.
-;   knob-main = mutation (CW = locked loop, CCW = pure random)     knob-x = tempo
+;   knob-main = mutation (CW = locked loop, CCW = pure random)
+;   knob-x = tempo (used when pulse-in-1 is unpatched)
+;   knob-y = active length
+;   pulse-in-1 = external clock (patch one in and it takes over from knob-x)
 ;   cv-out-1 = pitch     pulse-out-1 = clock trigger
 ;   patch: cv-out-1 -> SineSquare v/oct; pulse-out-1 -> Slope trig; Slope -> Mix.
 (patch
-  (def master (clock :tempo knob-x))
-  (def loop (tape notes '(C3 Eb3 G3 Bb3 C4 Bb3 G3 Eb3)))
+  (def master (normal (pulse-in :1) (clock :tempo (knob :x))))
+  (def loop (tape '(C3 Eb3 G3 Bb3 C4 Bb3 G3 Eb3)))
 
-  ; keep the current step, or replace with a random note in a 2-octave window from C3.
-  ; the window keeps replacements musical; without it snap would clamp to note 127.
-  (<- loop (if (chance knob-main)
-               (step loop)
-               (snap (add 48 (spread (random) 25)) :scale minor)))   ; 48 = C3, +0..24 semis = 2 oct
+  ; knob-y picks the active loop length, 1..(len loop) cells: 1 = single-cell
+  ; repeat, full = the whole loop. Spread the knob across the tape's own length.
+  (def length (add 1 (spread (knob :y) (len loop))))
 
-  (<- cv-out-1    (v-oct (step loop)))
-  (<- pulse-out-1 (tick))
-  (<- led-0       (step loop)))
+  ; keep the current step, or replace with a random note in a 2-OCTAVE window from C3.
+  ; (random) spans 0..4095, far above MIDI range; the window keeps replacements musical.
+  (<- loop (if (chance (knob :main))
+               (step loop :len length)
+               (snap (add C3 (spread (random) 25)) :scale minor))
+           :len length)
+
+  (<- (cv-out :1 :v-oct) (step loop :len length))
+  (<- (pulse-out :1) (trig))
+  (<- (led :0)       (step loop :len length)))

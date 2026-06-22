@@ -3,5 +3,5 @@
 (def slopes-plus (fn (:in :ceiling :amount => :gate :rise :fall)
   (def flip (schmitt in 64 ceiling))
   (<- gate (not flip))
-  (<- rise (vca (random :clk flip) :amp amount))
-  (<- fall (random :clk (fall flip)))))
+  (<- rise (vca (random :trig flip) :amp amount))
+  (<- fall (random :trig (fall flip)))))

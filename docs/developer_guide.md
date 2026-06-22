@@ -1,213 +1,274 @@
 # Developer guide
 
-This is for people who want to read, build or modify Lens itself. If you just
-want to write patches, you want [loupe.md](loupe.md) instead.
+For people who want to read, build, or modify Lens. If you only want to write
+patches, read [loupe.md](loupe.md) instead.
 
-The plan is to give you enough to find your way around. The code itself is
-the truth; when something here disagrees with it, the code wins.
+This guide is the map. When it disagrees with the code, the code wins. The C
+runtime in particular is the source of truth for what every kernel does; the
+JavaScript interpreter exists to support development.
 
-A note up front, since you'll probably feel it as you read: a lot of the
-hairier parts of the compiler and the runtime were written by Claude Code.
-The human assistant did his best to follow along and takes responsibility
-for the bugs, but isn't 100% sure how some of it works ;) If something
-looks strange but works, that's probably why.
+## Repo layout
+
+```
+compiler/   Loupe source -> snapshot pipeline (pure JavaScript)
+runtime/    the C runtime, the hardware shell (main.cpp), and the snapshot decoder
+cli/        the dev CLI and the sysex wire protocol
+web/        the web editor (the primary user interface)
+tools/      build helpers and lookup-table generators
+patches/    example patches
+docs/       this documentation
+attic/      prototype, shelved notes, and golden fixtures (gitignored)
+prelude.loupe   the standard library, loaded before every patch
+CMakeLists.txt, pico_sdk_import.cmake, LICENSE, package.json, ComputerCard.h
+```
 
 ## How it fits together
 
-Lens is two halves that talk to each other through one file format.
+The compiler is pure JavaScript on the host. It turns a patch into a flat
+binary snapshot. The runtime is C on the card: it decodes the snapshot into a
+wired graph and walks it once per audio sample, at 48 kHz. No scheduling
+decisions happen at run time; the order, the rates, the wiring and the
+core partition are all baked into the snapshot.
 
-**The compiler** (`compile.js`) takes Loupe text and produces a snapshot:
-a compact, self-describing binary blob (`snapshot.h`) that lists every node
-the patch needs and how they're wired. The snapshot is the only patch format
-that exists. There is no JSON layer, no intermediate AST that travels, no
-runtime representation that diverges from what was on disk.
+The whole design is one flat list of slots. Each slot holds a 12-bit value (or
+a small state struct whose first field is that value) and a kernel function
+pointer. A walk step is one indirect call per slot. The compiler does the hard
+work; the runtime stays dumb.
 
-**The runtime** (`loupe.h`) is a synchronous dataflow graph. The semantic
-model is: at 48 kHz every node is recomputed, its new value commits at the
-end of the sample, and the next sample reads what the previous one
-committed. The actual schedule cheats on that to fit the ~20 microsecond
-per-sample audio budget. Nodes with `interval <= 1` (audio plus edge
-detectors and anything else that genuinely needs every sample) form a
-must-run prefix that does run every sample. The rest is a control suffix
-that runs in a round-robin slice per sample: a beat's worth of control
-work spreads over a few samples, and stateful control nodes self-gate on
-their clock (advancing by the elapsed delta when deferred) so a node fires
-late but never skips. The visible behaviour matches the every-sample
-semantics; the schedule is just how that fits in the budget.
+## The compiler pipeline
 
-Everything in the language compiles down to a node of one of about 25
-kinds: oscillators, filters, tapes, gates, logic, routing. The
-interpreter's main loop is `Recompute` (one switch over node kinds), and
-`RunSchedule` walks the per-sample schedule.
+Each stage is one file in `compiler/` and reads in isolation. `compile-pipeline.js`
+chains them.
 
-The host (`main.cpp`) is the ComputerCard subclass that owns the audio
-interrupt, reads knobs and jacks, drives the LEDs, manages flash and USB,
-and feeds the runtime its per-sample context.
+| Stage | File | Job |
+|---|---|---|
+| Reader | `reader.js` | Loupe text to AST (S-expressions) |
+| Expander | `expander.js` | Resolve names, inline `fn`, expand special forms (`<-`, `use`, `tape`, `lens`, `score`, `normal`, sugar) |
+| Lowerer | `lowerer.js` | Build the slot graph; select a kernel per node; assign tape/audio buffers |
+| Scheduler | `scheduler.js` | Global topological sort; dual-core partition; single-writer verify |
+| Snapshot | `snapshot.js` | Binary-encode the scheduled graph |
 
-## The patch lifecycle
+`prelude.loupe` is loaded into the base environment before every patch. It holds
+every constant, hardware-jack name, scale, rhythm, and builtin signature with
+kwargs and a docstring. A patch can shadow any prelude binding.
 
-Every patch follows the same path, whether it arrived as Loupe text typed
-into the web editor, was sent over USB SysEx from the CLI, lives baked into
-the firmware as the factory default, or was loaded from flash at boot.
+**Reader** turns source text into numbers, symbols, keywords and lists.
 
-The compiler chews Loupe text into a snapshot, which is a compact binary
-blob describing every node and how they're wired. Those bytes can travel
-three ways: over USB as a SysEx message, into flash as the saved patch, or
-into the firmware itself as the factory default (`tools/bake.js` does that
-during a normal build). However it arrives, the card validates the magic
-number and version, then calls `ApplySnapshot` which decodes the snapshot
-straight into the runtime's live state. To keep the audio safe, the apply
-happens at a quiet moment between beats rather than mid-sample.
+**Expander** resolves names against the prelude and patch environment, inlines
+`fn` calls, and expands the special forms: the `<-` cable, `use`, `tape`,
+`audio`, `lens`, `score`, `normal`, and the sugar forms. It returns a flat list
+of slot records with resolved inputs. Op-lens calls (`(thru ops idx)` applied to
+an argument) are inlined here, so the later stages never see a half-applied lens.
 
-The thing to know if you ever change the snapshot layout is that three
-places have to agree about it: `snapshot_encode`/`snapshot_decode` in
-`snapshot.h`, `serializeSnapshot` in `compile.js`, and the version constant
-in each (`kSaveVersion` in `main.cpp`, `SAVE_VERSION` in `compile.js`).
-Bump them together. There are no migrations: an old saved patch is just
-rejected on version mismatch, and the user reloads from text.
+**Lowerer** turns the expanded graph into slots, selecting the concrete kernel
+name for each node from its argument pattern (for example, a record-head cable
+becomes a per-sample or per-cell variant), and assigns buffer objects to tape,
+audio and wave nodes. It also records the state-field schema for each kernel
+family, which the single-writer verifier uses.
 
-## The dual-core split
+**Scheduler** produces one global topological order over every slot, partitions
+it between the two cores by estimated cycle cost, and runs the single-writer
+verifier. The verifier checks that no `(slot, field)` pair has more than one
+writer; a violation makes the snapshot stage reject the graph. Stub kernels (ops
+that are declared but not yet implemented) are also caught here so they never
+reach a card. There is no rate classification: every slot is in the one order,
+and the runtime decides per slot whether to run or skip it this sample.
 
-The card has two cores and Lens uses both. The simplest way to think about
-the division is: Core 0 is in charge of sound, Core 1 is in charge of USB.
+**Snapshot** binary-encodes the scheduled graph. Header (magic, version, slot
+counts, K, buffer/terminal/kernel-registry counts), the kernel-name registry,
+the slot table, the buffer and terminal tables, and a trailing CRC-32.
+Little-endian. There is a size cap the encoder enforces before any USB
+round-trip.
 
-Core 0 is where the audio interrupt fires, once per sample (48,000 times a
-second, with about 20 microseconds to do its work). It runs most of the
-per-sample compute, drives the jacks and LEDs, reads the panel, and is the
-only thing allowed to write to flash. Core 1 handles the USB device stack
-and the SysEx parser. USB has to live somewhere, and Core 0 was already
-busy with audio.
+## The runtime
 
-The trick that makes them both useful at audio time: Core 0 hands a chunk
-of each sample's audio-rate work to Core 1. It does this by writing a
-sequence number into the inter-core FIFO, which fires an interrupt on Core
-1. Core 1 then runs its assigned nodes and writes back a "done" number.
-Core 0 commits Core 1's results on the next sample, once done matches what
-it sent. If Core 1 wasn't ready in time, Core 0 just holds the previous
-values for one sample and the affected nodes catch up next pass.
+`runtime_step` in `runtime/runtime.c` is the per-sample entry point. Each
+sample it:
 
-The handshake is lock-free because every shared field has exactly one
-writer, so there's no mutex or wait. The shared state lives in `main.cpp`
-as the `Core1Handshake c1_` struct. Within any one sample, every node
-reads the previous sample's value (never the in-flight one), so the
-cross-core split doesn't change what the music sounds like at all. A
-single-core simulator (a dev tool that hasn't been released yet) produces
-byte-identical output to the hardware.
+1. Refreshes the hardware-input scratch from the `HardwareInputs` struct.
+2. Walks every slot once in topological order, calling each slot's kernel. Each
+   slot reads its inputs' freshly written outputs from this same tick. A slot is
+   run unconditionally if it is an integrator (state advances every sample:
+   oscillators, filters, envelopes, edge/pulse counters, hardware reads); any
+   other slot is skipped when all of its 12-bit inputs are unchanged since it
+   last ran (`step_slot`, a pure cost optimisation, never a semantic tier).
+3. Commits record-head writes: cells written this tick become visible to tape
+   readers next tick.
+4. Publishes cross-core shadows and drives the terminals: reads each terminal's
+   slot output and writes it to the matching `HardwareOutputs` field.
 
-A few things follow from this that are easy to get wrong:
+Dispatch is a function pointer per slot. At apply time `snapshot_apply` resolves
+each kernel name to an index into the `KFN` table and stores the function
+pointer on the slot, so a walk step is one indirect call, no switch.
 
-- Don't call TinyUSB from Core 0. USB belongs to Core 1.
-- `tud_init` has to run from `core1_entry` so that the USB interrupt is
-  registered on Core 1's interrupt controller.
-- Flash erase blocks the audio interrupt for tens of milliseconds, far
-  longer than one sample. So `SaveToFlash` always reboots the card after
-  writing rather than trying to resume.
-- Every function on the per-sample audio path has to live in RAM (apply
-  the `LENS_AUDIO_HOT` macro in `loupe.h`). If it lives in flash, a cache
-  miss inside the audio interrupt will glitch the sound.
+The state pool is static; there is no malloc. Audio buffers are 12-bit packed
+(three bytes per two cells); the 128 KB audio pool holds roughly 1.82 seconds at
+48 kHz, which is the ceiling on total tape and delay length. A separate small
+pool holds the sequence tapes.
 
-In terms of where to look: `loupe.h` has the per-sample kernels and the
-schedule primitives (`RunMust`, `CommitMust`, `RunCtrl`, `CommitCtrl`,
-`RunSchedule`). `main.cpp` has the per-sample orchestration, the
-handshake, and the bridge methods that `usb_core1.cpp` calls into from
-Core 1.
+**Free feedback.** Slots walk in topological order, so each reads its inputs'
+fresh outputs. Cycles get an implicit `z1` inserted by the compiler at one
+back-edge, so the back-edge read sees the previous tick's value. No cycle
+detection at run time; the snapshot already encodes a safe order.
 
-## Constraints to respect
+**Single-writer.** Every state field has exactly one writer by construction, and
+the scheduler proves it at compile time. This is what makes the design safe
+without mutexes, on one core or two.
 
-- Per-sample audio budget on Core 0 is around 20 microseconds. The
-  "audio-hot path" means anything reachable from `Recompute`, `RunMust`,
-  `CommitMust` or `RunSchedule`: the per-builtin kernels, the schedule walk,
-  the commit step. Anything you add there is in this budget.
-- RAM usage hovers around 95% of 256 KB. New runtime state competes with the
-  tape buffer; check `arm-none-eabi-size build/lens.elf` after a change. If
-  you need to claw some RAM back to add a feature, the biggest single block
-  is `kBufferBytes` in `tape.h` (currently 128 KB, the torus shared by every
-  tape and sampling/delay buffer in the runtime). Halving it to 64 KB frees
-  64 KB, at the cost of shorter maximum tapes and shorter delay times. It
-  has to stay a power of two for the ring mask to work.
-- Runtime DSP is 32-bit integer only. There's no `__aeabi_lmul` / `lldiv`
-  in the audio path. For high-half products use `umulhi32` (see
-  `onePoleStep` and `q16Mul` in `loupe.h` for the pattern).
-- The 12-bit grid is the I/O boundary. Internal compute can go wider
-  (Q12 / Q16 / 32-bit) but anything written to a tape, sent to a jack, or
-  committed to a node's `value` is 12-bit at rest.
-- Text is the only patch format. No JSON. The compiler explicitly rejects
-  `{` at the top level.
+### Kernels
 
-## Build and run
+The kernel bodies all live in `runtime/runtime.c` as `op_*` functions, each
+marked for RAM placement so it stays off the flash bus on the audio path. They
+cover arithmetic and logic, oscillators and edge detectors, filters and
+dynamics, envelopes, the drum voices, and the tape and record-head ops. The
+name-to-id table (`KTABLE`) and the function-pointer table (`KFN`) are in the
+same file; `snapshot_apply.c` looks names up through `runtime_find_kernel`.
 
-The firmware build needs the Raspberry Pi
-[pico-sdk](https://github.com/raspberrypi/pico-sdk):
+A pure arithmetic kernel writes an `int32_t` to its slot output. A stateful
+kernel owns a state struct at the slot output and writes its output field plus
+any per-kernel state (phase accumulator, filter memory, and so on).
+
+## Run or skip
+
+There is no rate tier. Every slot is in one topological order and is eligible to
+run every sample; the runtime just decides per slot whether to. An integrator
+(its state advances every sample: oscillators, filters, slews, envelopes, the
+drum voices, edge and pulse counters, wave/tap cursors, hardware reads) always
+runs. Any other slot is skipped on a sample where all of its inputs are bit-for-
+bit unchanged since it last ran, because its output cannot have changed either.
+A still patch then costs little beyond the audio path, and a sequencer's burst
+of pure-op work on a beat only happens on that beat. `runtime_step_reference`
+runs every slot unconditionally and is the oracle the skipping walk is diffed
+against, bit for bit.
+
+## Adaptive dual-core
+
+The scheduler always produces a two-core partition (each slot record carries a
+core byte), and the firmware always builds the full dual-core path: core 0 drives
+the audio interrupt and rings a doorbell, core 1 runs its slice in parallel.
+
+Cross-core reads are made race-free by the single-writer property plus a shadow:
+a consumer on one core reads a shadow of a producer on the other core, and the
+shadows are republished at the window boundary after both core walks complete.
+That gives cross-core edges a deterministic one-sample lag while intra-core
+reads stay fresh.
+
+Dual-core execution engages only when the partition actually places slots on
+core 1 (`dual_active`). For the current corpus the cost model keeps every slot on
+core 0, so the card runs core 0 only and deterministic, with the core-1 doorbell
+path live and ready for heavier patches once cost calibration moves work onto it.
+On-hardware confirmation of the dual-core timing is the open item.
+
+Core 1 also runs the TinyUSB device stack and the sysex parser. The patch-swap
+handshake is lock-free by single-writer: core 1 stages an incoming snapshot and
+sets a ready flag; core 0 reads it at the next sample boundary, calls
+`snapshot_apply`, and swaps the runtime pointer.
+
+## Sysex transport
+
+Frame: `F0 7D 4C 45 <cmd> <8-into-7 payload> F7`. The manufacturer id is
+`7D 4C 45` (educational id plus `LE`); payload bytes are 8-into-7 packed so
+every byte stays below `0x80`. Commands are defined in both `cli/sysex.js` and
+`runtime/sysex.h`: write/read state, save to flash, factory reset, ping, and the
+diagnostic and perf queries (diag, perf, slot-perf) with their matching dump
+responses. The web editor uses the same framing layer as the CLI.
+
+## Tools
+
+`tools/` holds the build and codegen helpers: `build_web.js` bundles the
+compiler and prelude for the web editor, the `gen-*.js` scripts regenerate the
+pitch / rate / sine lookup tables baked into the runtime, and `cost.js` does
+static per-slot cost estimation over the kernel cost tables.
+
+## Build and flash
+
+**Firmware.** Needs the Raspberry Pi
+[pico-sdk](https://github.com/raspberrypi/pico-sdk) (set `PICO_SDK_PATH`):
 
 ```sh
 cmake -B build
-cmake --build build -j      # produces build/lens.uf2 (copied to repo root)
+cmake --build build -j
 ```
 
-The compiler and tooling are pure Node:
+cmake runs `runtime/bake_factory.js` first, which compiles `patches/hello.loupe`
+into `runtime/factory_snapshot.h` (the patch embedded in the firmware). The
+build produces `lens.uf2` and copies it to the repo root. Flash it by mounting
+the card as the `RPI-RP2` USB drive and copying `lens.uf2` onto it.
+
+`LENS_PERF_PROBE` (default on) is a cmake cache option that compiles in the
+per-sample cycle probe behind the `perf` / `slot-perf` sysex queries.
+
+**JS tooling.**
 
 ```sh
 npm install
-node compile.js patches/turing-machine.loupe         # text to snapshot (binary on stdout)
-node tools/bake.js                           # re-bake the factory default
-node cli.js write patches/turing-machine.loupe       # send to a connected card via SysEx
+node cli/cli.js write patches/turing-machine.loupe   # compile -> snapshot -> WRITE_STATE
+node cli/cli.js write ... --save                      # also flash it on the card
+node cli/cli.js ping                                  # handshake
+node cli/cli.js watch patches/hello.loupe             # live-code loop, re-push on save
+node cli/cli.js perf                                  # read perf counters
 ```
 
-The verify loop after a change is usually: build the firmware, re-bake the
-factory if you touched compile output, flash the card, and listen.
+## Adding a builtin
 
-There's also a local host-side simulator that compiles loupe.h into a
-single-core binary and renders any patch to a WAV without hardware. It's
-useful for diffing output byte-for-byte against an earlier build, but it
-isn't ready to release yet. It may make it into this repo at some point.
+Three places:
 
-## The two files to read
+1. Add `(def name (fn (...) :kwargs (...)))` to `prelude.loupe` with a docstring.
+2. Add the JS kernel to the interpreter in `compiler/interp.js`.
+3. Add the C kernel `op_name` to `runtime/runtime.c` and register it in `KTABLE`
+   (and `KFN`).
 
-If you read nothing else, read these two. The compiler is `compile.js` and
-the runtime is `loupe.h`. Almost everything interesting in Lens lives in
-one or the other. The compiler turns text into a snapshot; the runtime
-turns a snapshot into sound. Everything else is plumbing around those two.
+Then run the validator (`compiler/validate.js`) to confirm the prelude, the
+interpreter and the C kernel table agree, and add fixture cases for the new
+kernel.
 
-## Gotchas worth knowing
+## Testing
 
-- IDE clang diagnostics about `tusb.h`, `hardware/gpio.h`, or `ComputerCard.h`
-  not found are noise: those headers are added by CMake at configure time
-  and the build is fine. The real build is `cmake --build build -j`.
-- A "magic mismatch" on a saved patch means stale flash from an older build;
-  factory reset clears it.
-- A "version mismatch" means `kSaveVersion` (main.cpp) and `SAVE_VERSION`
-  (compile.js) are out of sync. Bump both.
-- The USB product string is set in `usb_descriptors.c`. If you change it,
-  the web UI's device filter (`/lens/i` in `web/app.js`) has to match or
-  Connect won't find the card.
-- `pico_enable_stdio_usb(lens 0)` is required; turning it on breaks the
-  cable-detect normalisation probe.
+The host runner (`runtime/test/host_runner`) runs a compiled snapshot against a
+per-sample input trace. The gates compare the optimized walk against the
+`runtime_step_reference` oracle bit for bit (`attic/tests/oracle-diff.js`), hold
+behaviour across refactors with golden traces (`golden.js`), and drive an
+impulse through the audio buffers (`audio-gate.js`). The gate scripts live under
+`attic/` (gitignored).
+
+## Hardware constraints
+
+- RP2040 Cortex-M0+ overclocked to 250 MHz at 1.15 V. Roughly 5,200 cycles per
+  sample at 48 kHz.
+- No hardware divide, no 64-bit multiply, no FPU on M0+. All DSP is 32-bit
+  integer; use `umulhi32` for high-half products.
+- 256 KB RAM, and it is tight (well above 90% used). The 128 KB audio pool
+  dominates and is the point. The audio path is flash-resident code pinned into
+  RAM via `__not_in_flash_func`. Check the linker memory report after adding any
+  static pool, and mark any new function on the `ProcessSample` / `runtime_step`
+  call tree with `__not_in_flash_func`.
+- 2 MB flash. A flash save blocks the audio loop for tens of milliseconds and
+  reboots the card.
+
+## Gotchas
+
+- IDE clang diagnostics about `ComputerCard.h` not being found are harmless; the
+  real build is `cmake --build build`.
+- `vreg_set_voltage` and `set_sys_clock_khz(250000, true)` must run before
+  `board_init()` in `main()`. Do not reorder them.
+- `pico_enable_stdio_usb(lens 0)` is required: enabling USB stdio breaks the
+  ADC normalisation probe that detects whether a jack is patched.
+- The factory snapshot regenerates automatically under cmake. If you compile
+  outside cmake, run `node runtime/bake_factory.js` from the repo root.
+
+## Heritage
+
+These attribution comments must survive every refactor:
+
+- Drum voices after Mutable Instruments Plaits (Émilie Gillet).
+- The band-limited sawtooth and the Utility-Pair lineage after Chris Johnson.
+- The ADC self-heal / normalisation probe after Vincent Maurer's Grains card,
+  preserved in `ComputerCard.h`.
 
 ## Where to start reading
 
-If you want to understand the runtime: open `loupe.h`, find `Recompute`,
-read the switch. Then look at one or two `op*` kernels (`opAudioPhasor`,
-`opAudioWave` are representative). Then read `RunSchedule` and the
-`RunMust` / `CommitMust` pair to see the per-sample shape.
-
-If you want to understand the compiler: open `compile.js`, find
-`compilePatch` near line 1350. It calls `normalizePatch`,
-`expandAndClaimTapes`, then builds a `Compiler` instance and walks the
-patch outputs. The actual per-builtin compilation is `Compiler.compileRaw`,
-the long switch. Helpers like `expandTree` (macro expansion) and
-`parseSignature` (`fn` signature parsing) sit above it.
-
-If you want to understand the cross-core dance: open `main.cpp` and read
-`ProcessSample`, `FireDoorbell`, `CommitCore1Slice`, `Core1Slice`. Then
-`loupe.h`'s `RunMust` / `CommitMust` for what each core actually executes.
-
-If you want to add a new builtin: there are roughly four places to touch.
-Add a `NodeKind` enum entry in `nodes.js` (the JS side regenerates
-`node_kinds.h` from it via `tools/gen_kinds.js`), add a `case` in
-`Compiler.compileRaw` in `compile.js` for the surface syntax, add a `case`
-in `Recompute` in `loupe.h` for the runtime behaviour (or write a small
-`op*` kernel and call it from there), and bump the snapshot version if
-your new node stores state the snapshot needs to round-trip. Pick an
-existing simple builtin and follow its trail through those four files.
-
-Have fun in there.
+- **Compiler:** `compiler/expander.js` for how Loupe forms expand, then
+  `compiler/lowerer.js` for kernel selection, then `compiler/scheduler.js` for
+  the topological order and single-writer verifier.
+- **Runtime:** `runtime/runtime.c` for the per-sample walk and the kernels, then
+  `runtime/snapshot_apply.c` for how a snapshot becomes a wired graph.

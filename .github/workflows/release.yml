@@ -1,0 +1,84 @@
+name: release
+
+# Push a tag like v0.1.0 to cut a release. The job builds the firmware,
+# smoke-tests the JS oracle, and publishes a GitHub Release with lens.uf2
+# attached. GitHub auto-attaches the source tarball + zip.
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v0.1.0) for a manual release'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi cmake build-essential libstdc++-arm-none-eabi-newlib
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache pico-sdk
+        id: pico-sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: pico-sdk
+          key: pico-sdk-2.0.0
+
+      - name: Fetch pico-sdk
+        if: steps.pico-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --branch 2.0.0 --depth 1 https://github.com/raspberrypi/pico-sdk.git
+          (cd pico-sdk && git submodule update --init --depth 1)
+
+      - name: Configure
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build firmware
+        env:
+          PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+        run: cmake --build build -j
+
+      - name: Verify .uf2 exists
+        run: |
+          test -f lens.uf2 || { echo "lens.uf2 not produced at repo root"; exit 1; }
+          ls -lh lens.uf2
+
+      - name: JS smoke test
+        run: |
+          npm install --no-audit --no-fund
+          node attic/test.js
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Lens ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            lens.uf2

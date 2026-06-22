@@ -1,0 +1,11 @@
+; a 4-note minor arpeggio stepping once per master tick.
+;   knob-x = tempo     audio-out-1 = arpeggio voice
+;   cv-out-1 = pitch     pulse-out-1 = trigger
+(patch
+  (def master (clock :tempo (knob :x)))
+  (def melody (tape '(C3 Eb3 G3 Bb3)))
+
+  (def voice  (step melody))
+  (<- (cv-out :1 :v-oct) voice)
+  (<- (pulse-out :1) (trig))
+  (<- (audio-out :1) (sine voice)))

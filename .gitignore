@@ -19,3 +19,8 @@ lens_run
 lens_sim_events.csv
 *.wav
 lens_raw.txt
+
+# compiled host sim binary (dev only)
+runtime/test/host_runner
+
+.claude/settings.json

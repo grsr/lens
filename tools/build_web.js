@@ -1,33 +1,45 @@
 #!/usr/bin/env node
-// build_web.js — assemble compiler modules + example patches + web/app.js into web/index.html.
-// WebMIDI requires a secure context (https or localhost). Port filter /lens/i must match usb_descriptors.c.
+// tools/build_web.js — assemble compiler modules + example patches + web/app.js
+// into a single-file HTML bundle at web/lens.html.
+// WebMIDI requires a secure context (https or localhost).
 //
-//   node tools/build_web.js          -> web/index.html (also self-tests the bundle)
+//   node tools/build_web.js    -> web/lens.html (also self-tests the bundle)
 'use strict';
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const vm = require('vm');
+const vm   = require('vm');
 
-const ROOT = path.join(__dirname, "..");
-const readSrc = (f) => fs.readFileSync(path.join(ROOT, f), "utf8")
-  .replace(/^#![^\n]*\n/, "");   // strip shebangs before inlining into <script>
+const ROOT   = path.join(__dirname, "..");
+const LENS = ROOT;
+const readSrc = (f) => fs.readFileSync(f, "utf8").replace(/^#![^\n]*\n/, "");
 
-// Compiler modules bundled as browser-compatible CommonJS; fs/path are stubbed in the shim.
-const MODULES = ["reader.js", "nodes.js", "intervals.js", "serialize.js", "compile.js", "sysex.js"];
+// Lens compiler modules — order matters: each require must resolve against an earlier def.
+const MODULES = [
+  "compiler/reader.js",
+  "compiler/expander.js",
+  "compiler/op-table.js",
+  "compiler/lowerer.js",
+  "compiler/scheduler.js",
+  "compiler/snapshot.js",
+  "compiler/validate.js",
+  "cli/sysex.js",
+];
 
-// Example patches embedded in the page: every top-level .loupe in patches/.
-// (Library files live in patches/utility-pair/ and are not included here.)
+// Top-level patches only; utility-pair/ library files are not standalone examples.
 const EXAMPLE_FILES = fs.readdirSync(path.join(ROOT, "patches"))
   .filter(f => f.endsWith(".loupe"))
   .sort()
   .map(f => "patches/" + f);
 
+// Browser-compatible CommonJS shim. fs/path stubs so require('fs') and require('path')
+// in modules that call them at module load time don't crash. validate.js calls fs lazily
+// (only inside validatePreludeKernels(), which is never invoked in the browser).
 const shim = `
 const __mods = {}, __cache = {};
 function __def(name, fn) { __mods[name] = fn; }
 function __req(name) {
   if (name === "fs")   return { existsSync: () => false,
-                                readFileSync: () => { throw new Error("(use ...) cannot read files in the web loader; paste the module inline"); } };
+                                readFileSync: () => { throw new Error("fs.readFileSync not available in web bundle"); } };
   if (name === "path") return { resolve: (...a) => a.filter(Boolean).join("/"),
                                 dirname: (p) => p.split("/").slice(0, -1).join("/") || ".",
                                 basename: (p) => p.split("/").pop(),
@@ -41,35 +53,81 @@ function __req(name) {
   return m.exports;
 }`;
 
-const lib = shim + "\n"
-  + MODULES.map(f => "__def(" + JSON.stringify(f) + ", function (module, exports, require) {\n"
-                   + readSrc(f) + "\n});").join("\n")
-  + `\nconst Lens = Object.assign({}, __req("compile.js"), __req("sysex.js"));\n`;
+// prelude.loupe is loaded by expander.js via loadFile('prelude.loupe').
+// In the browser, loadFile reads from __LENS_FILES. Inject both prelude and
+// any other files the expander requests at compile time.
+const preludeText = readSrc(path.join(ROOT, "prelude.loupe"));
+const filesInject = "const __LENS_FILES = " + JSON.stringify({ "prelude.loupe": preludeText }) + ";\n";
+
+// The web loadFile function: checks __LENS_FILES first, then falls back to a
+// fetch-populated cache (useCache in app.js). Defined here so modules see it
+// before the Lens namespace is assembled.
+const loadFileShim = `
+function __webLoadFile(relpath) {
+  if (__LENS_FILES[relpath]) return __LENS_FILES[relpath];
+  return null;
+}
+`;
+
+const lib = filesInject + shim + "\n" + loadFileShim + "\n"
+  + MODULES.map(f => {
+      const fullPath = path.join(ROOT, f);
+      // Provide __dirname and __filename stubs so modules that reference them at load
+      // time (e.g. validate.js) don't throw ReferenceError in the browser sandbox.
+      const dirnameStub = "const __dirname = '', __filename = '';\n";
+      return "__def(" + JSON.stringify(path.basename(f)) + ", function (module, exports, require) {\n"
+           + dirnameStub + readSrc(fullPath) + "\n});";
+    }).join("\n")
+  + `
+const Lens = Object.assign(
+  {},
+  __req("reader.js"),
+  __req("expander.js"),
+  __req("lowerer.js"),
+  __req("scheduler.js"),
+  __req("snapshot.js"),
+  __req("validate.js"),
+  __req("sysex.js")
+);
+`;
 
 const examples = {};
-for (const f of EXAMPLE_FILES) examples[f.replace(/^patches\//, "").replace(/\.loupe$/, "")] = readSrc(f);
+for (const f of EXAMPLE_FILES) {
+  examples[f.replace(/^patches\//, "").replace(/\.loupe$/, "")] = readSrc(path.join(ROOT, f));
+}
 const examplesJs = "const EXAMPLES = " + JSON.stringify(examples) + ";\n";
 
-// Self-test: bundled compiler must compile every example.
+// Self-test: run the bundled pipeline in a vm sandbox on hello.loupe.
 {
   const sandbox = {};
   vm.createContext(sandbox);
   vm.runInContext(lib + "globalThis.__Lens = Lens;", sandbox);
   const L = sandbox.__Lens;
-  // Host-side loader so (use) resolves through real fs (the sandboxed compiler has no require).
-  const useLoader = (baseDir, file) => {
-    let full = path.resolve(baseDir, file);
-    if (!fs.existsSync(full) && fs.existsSync(full + ".loupe")) full += ".loupe";
-    if (!fs.existsSync(full)) return null;
-    return { text: fs.readFileSync(full, "utf8"), baseDir: path.dirname(full) };
+
+  // Host-side loadFile so the sandboxed pipeline can read files via real fs.
+  const hostLoadFile = (relpath) => {
+    const full = path.join(ROOT, relpath);
+    if (fs.existsSync(full)) return fs.readFileSync(full, "utf8");
+    if (fs.existsSync(full + ".loupe")) return fs.readFileSync(full + ".loupe", "utf8");
+    return null;
   };
+
   for (const f of EXAMPLE_FILES) {
-    const snap = L.serializeSnapshot(L.compilePatch(L.loadPatch(readSrc(f), path.dirname(path.join(ROOT, f)), useLoader)));
-    console.log("self-test: " + f + " -> " + snap.length + " B snapshot");
+    try {
+      const text       = readSrc(path.join(ROOT, f));
+      const ast        = L.read(text);
+      const expanded   = L.expand(ast, { loadFile: hostLoadFile });
+      const lowered    = L.lower(expanded);
+      const scheduled  = L.schedule(lowered);
+      const snap       = L.encode(scheduled, lowered);
+      console.log("self-test: " + f + " -> " + snap.length + " B snapshot");
+    } catch (e) {
+      console.error("self-test FAIL: " + f + ": " + e.message);
+      process.exit(1);
+    }
   }
 }
 
-// Escape "</script" only — a blanket "</" mangling breaks regex literals like /</g.
 const esc = (s) => s.replace(/<\/(script)/gi, "<\\/$1");
 const starter = examples["hello"];
 
@@ -91,7 +149,6 @@ const html = `<!doctype html>
   #status { margin-left: auto; color: #7d7668; max-width: 46%; }
   #status.err { color: #e07a5f; }
   #status.ok  { color: #9fd08a; }
-  /* editor: transparent textarea over a coloured pre, same metrics */
   main { flex: 1; position: relative; min-height: 0; }
   #hl, #editor { position: absolute; inset: 0; margin: 0; padding: 14px 16px;
                  font: 13px/1.5 ui-monospace, Menlo, monospace; white-space: pre;
@@ -123,9 +180,8 @@ const html = `<!doctype html>
   <pre id="hl" aria-hidden="true"></pre>
   <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off">${starter.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</textarea>
 </main>
-<footer>edits compile as you type · send = play it now · save to card = survives power-off · Chrome/Edge only (WebMIDI) · <a href="https://github.com/grsr/lens/blob/main/docs/loupe.md" target="_blank">loupe docs</a> · <a href="https://github.com/grsr/lens" target="_blank">repo</a></footer>
+<footer>edits compile as you type &middot; send = play it now &middot; save to card = survives power-off &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://github.com/grsr/lens/blob/main/docs/loupe.md" target="_blank">loupe docs</a></footer>
 <script>
-  // Surface any error to the status bar.
   window.addEventListener("error", function (e) {
     var s = document.getElementById("status");
     if (s) { s.textContent = "error: " + (e.message || (e.error && e.error.message) || "see console"); s.className = "err"; }
@@ -137,14 +193,14 @@ const html = `<!doctype html>
 </script>
 <script>${esc(lib)}</script>
 <script>${esc(examplesJs)}</script>
-<script>${esc(readSrc("web/app.js"))}</script>
+<script>${esc(readSrc(path.join(LENS, "web", "app.js")))}</script>
 `;
 
-// Syntax-check each emitted <script> block (runtime ReferenceErrors from DOM globals are fine).
 for (const [, body] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
   try { new Function(body); }
   catch (e) { if (e instanceof SyntaxError) throw new Error("emitted <script> has a syntax error: " + e.message); }
 }
 
-fs.writeFileSync(path.join(ROOT, "web", "index.html"), html);
-console.log("built web/index.html (" + (html.length / 1024).toFixed(0) + " KB)");
+const outPath = path.join(ROOT, "web", "lens.html");
+fs.writeFileSync(outPath, html);
+console.log("built web/lens.html (" + (html.length / 1024).toFixed(0) + " KB)");

@@ -1,0 +1,11 @@
+; a sine with knob-controlled pitch, vibrato depth, and vibrato speed.
+;   knob-main = pitch (C3 to B4, 24 semitones)
+;   knob-x    = vibrato depth (CCW = none, CW = wide)
+;   knob-y    = vibrato speed (~0 to ~30 Hz)
+;   audio-out-1 = sine + vibrato
+;
+; :hz X accepts a literal Hz value or a stream. A streamed :hz reads the value
+; directly as Hz, so (spread knob-y 30) gives 0..29 Hz across the knob's travel.
+(patch
+  (def pitch (add C3 (spread (knob :main) 24)))
+  (<- (audio-out :1) (sine pitch :pm (sine :hz (spread (knob :y) 30)) :depth (knob :x))))

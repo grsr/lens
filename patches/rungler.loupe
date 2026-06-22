@@ -1,20 +1,63 @@
-; two oscillators feeding each other through a tape (after rob hordijk's benjolin).
-; osc 1 clocks a sample of osc 2 into the tape; the tape re-tunes both oscillators.
-;   knob-main = feedback depth (clean to chaos)     knob-x = base pitch     knob-y = osc interval
-;   audio-out-1 = both oscs mixed     cv-out-1 = the rungle voltage
-;   patch: audio-out-1 -> Mix. cv-out-1 -> any modulation input (filter cutoff, osc pitch)
-;          for an extra layer of stepped chaos.
+; benjolin (after rob hordijk): two oscillators cross-modulate through a rungler.
+; the rungler is a shift register clocked by osc2, fed osc1's comparator bit XORed
+; back on itself (a nonlinear feedback shift register). its stepped voltage is the
+; CV that re-tunes both oscillators, so the whole thing chases its own tail.
+; for the full rungler sound, run audio-out-1 into the workshop filter with the rungle
+; (cv-out-1) on its cutoff, then add a touch of FM and resonance: that filtered, resonant
+; sweep is where it really sings.
+;   knob-x = osc1 pitch (the audible voice)
+;   knob-y = osc2 pitch = rungler CLOCK rate (turn down for a slow stepped sequence, up for audio-rate chaos)
+;   knob-main = rungler amount (0 = stable drone, up = the rungle sweeps the pitches into chaos)
+;   switch up = freeze the rungler: the current pattern locks into a repeating loop
+; jacks (patch into the workshop filter):
+;   audio-out-1 = both oscs mixed     -> filter audio in
+;   cv-out-1    = rungle voltage (stepped)  -> filter cutoff (add resonance + a little FM)
+;   cv-out-2    = rungle voltage (smoothed) -> filter cutoff for gliding sweeps instead
+;   audio-out-2 = osc1 alone          -> filter the oscillators separately, or use as a mod source
+;   pulse-out-1 = rungler clock (osc2 edges) -> sync the rest of the system
+;   audio-in-1  = optional analog feedback: patch the filter out back here and it joins the
+;                 rungler's data, folding the analog filter into the digital chaos (inert if unpatched)
 (patch
-  (def depth  knob-main)
-  (def rungle (tape '(0 512 1024 1536 2048 2560 3072 3584)))    ; eight cells, seeded with a ramp
+  (def amount (spread (knob :main) 13))              ; rungler depth: 0..12 semitones per rungle level
+  (def p1 (add 30 (spread (knob :x) 49)))            ; osc1 pitch: notes 30..78 (the audible voice)
+  (def p2 (spread (knob :y) 73))                     ; osc2 = clock: notes 0..72 (~8 Hz slow .. ~660 Hz audio)
 
-  (def mod  (mul (bipolar (step rungle)) depth :bipolar))
-  (def base (spread knob-x 60))
-  (def o1   (phasor (add base (spread mod 24))))
-  (def o2   (phasor (add (add base (spread knob-y 24)) (spread mod 48))))
+  ; the rungler register, seeded so it never starts on a fixed point
+  (def reg (tape '(0 1 1 0 1 0 0 1)))
 
-  (<- rungle (unipolar (saw o2)) :clk o1)
+  ; rungler DAC: the three most-recent stages, binary weighted (0..7), scaled to full scale
+  (def rungle3 (add (add (mul (tap reg :amount 1) 4)
+                         (mul (tap reg :amount 2) 2))
+                    (tap reg :amount 3)))
+  (def rungle  (div (mul rungle3 VMAX) 7))           ; 0..7 -> VMIN..VMAX
 
-  (<- audio-out-1 (mix (saw o1) (saw o2)))
-  (<- cv-out-1    (cv (step rungle)))
-  (<- led-0       (step rungle)))
+  ; the rungle voltage is the CV that drives both oscillators' pitch (independent base pitches)
+  (def fm (mul rungle3 amount))
+  (def pitch1 (add p1 fm))
+  (def pitch2 (add p2 fm))
+
+  ; one phasor per voice: its ramp drives the rungler timing (comparator + clock) and,
+  ; via :phase, the audio triangles below, so they stay phase-coherent
+  (def o1 (phasor pitch1))                           ; ramp: osc1 comparator source
+  (def o2 (phasor pitch2))                           ; ramp: rungler clock
+
+  ; nonlinear feedback shift register: recirculate the oldest stage, and while running
+  ; XOR in fresh data (osc1 comparator XOR the filter return). switch UP stops the fresh
+  ; data, so the register just loops its 8 bits = the current pattern locks. clocked by osc2.
+  (def c1   (mask (gt o1 VMID) 1))                   ; osc1 ramp split at its midpoint
+  (def fb   (mask (gt (audio-in :1) VMID) 1))        ; filter feedback bit (0 when unpatched)
+  (def lock (mask (gt (switch :z) VMID) 1))          ; switch up = freeze: lock the pattern into a loop
+  (def run  (sub 1 lock))
+  ; din = comparator XOR oldest-stage XOR a tail term. running tail = fb; locked tail = c1,
+  ; which cancels c1 so din = oldest-stage (pure recirculation = the pattern loops). the lock
+  ; rides the fb side so the comparator's feedback path keeps its exact depth (no added z-1).
+  (def din (xor (xor c1 (tap reg :amount 8))
+                (add (mul run fb) (mul lock c1))))
+  (<- reg din :trig o2)
+
+  (<- (audio-out :1) (mix (triangle :phase o1) (triangle :phase o2)))
+  (<- (audio-out :2) (triangle :phase o1))           ; osc1 alone
+  (<- (cv-out :1)    (cv rungle))                    ; rungle voltage, stepped
+  (<- (cv-out :2)    (cv (slew rungle :rate 500)))   ; rungle voltage, smoothed (gliding cutoff)
+  (<- (pulse-out :1) (trig o2))                      ; rungler clock, one pulse per osc2 cycle
+  (<- (led :0)       rungle))

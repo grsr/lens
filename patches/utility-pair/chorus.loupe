@@ -3,4 +3,4 @@
   (def buf (audio :seconds 0.05))
   (<- buf in)
   (def sweep (sine :rate speed))
-  (<- out (mix in (tap buf :amount (add (add 200 (div depth 8)) (mul sweep 120)) :interp)))))
+  (<- out (mix in (tap buf :amount (add (add 200 (div depth 8)) (vca sweep 120)) :interp)))))

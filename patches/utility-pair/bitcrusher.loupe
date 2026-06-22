@@ -1,2 +1,3 @@
 ; UTILITY: bitcrusher — sample-rate reduction (crush) then bit-depth reduction (mask top bits).
-(def bitcrusher (fn (:in :rate :depth 3584) (mask (crush in rate) depth)))
+; mask is bitwise, so quantise in the unipolar domain to keep the audio's sign.
+(def bitcrusher (fn (:in :rate :depth 3584) (bipolar (mask (unipolar (crush in rate)) depth))))
