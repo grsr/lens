@@ -126,6 +126,19 @@ const examplesJs = "const EXAMPLES = " + JSON.stringify(examples) + ";\n";
       process.exit(1);
     }
   }
+
+  // Browser-path guard: the editor reads the prelude from the bundled __LENS_FILES,
+  // not the filesystem. Compile a note-using patch through that path so a broken
+  // prelude injection ships as a build failure, not a dead editor.
+  try {
+    const webLoad = vm.runInContext("__webLoadFile", sandbox);
+    const lowered = L.lower(L.expand(L.read("(patch (<- (cv-out :1) (v-oct C3)))"), { loadFile: webLoad }));
+    L.encode(L.schedule(lowered), lowered);
+    console.log("self-test: bundled-prelude path resolves note names");
+  } catch (e) {
+    console.error("self-test FAIL: bundled prelude (__LENS_FILES) not loading: " + e.message);
+    process.exit(1);
+  }
 }
 
 const esc = (s) => s.replace(/<\/(script)/gi, "<\\/$1");

@@ -61,8 +61,11 @@ async function pullUses(relpath) {
 }
 
 // loadFile(relpath): returns text string or null. relpath is repo-root-relative.
+// Checks the fetched (use ...) cache, then the files bundled at build time
+// (prelude.loupe), so the expander can read the prelude in the browser.
 const loadFile = (relpath) => {
   if (useCache.has(relpath)) return useCache.get(relpath);
+  if (typeof __LENS_FILES !== "undefined" && __LENS_FILES[relpath]) return __LENS_FILES[relpath];
   return null;
 };
 

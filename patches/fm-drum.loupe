@@ -1,5 +1,4 @@
 ; 2-operator FM drum. Carrier body + modulator colour.
-; Modelled on the Erica MKI FM drum: three modes, two voices, one switch.
 ;   z-switch down/middle/up = kick / tom / cymbal-cowbell character
 ;   knob-main = pitch within mode (each mode centres on a different OCTAVE)
 ;   knob-x    = FM ratio (within the mode's ratio range)
