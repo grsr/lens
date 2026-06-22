@@ -33,7 +33,7 @@ find_program(NODE_EXECUTABLE node REQUIRED)
 set(FACTORY_H ${CMAKE_CURRENT_LIST_DIR}/runtime/factory_snapshot.h)
 set(FACTORY_INPUTS
     ${CMAKE_CURRENT_LIST_DIR}/runtime/bake_factory.js
-    ${CMAKE_CURRENT_LIST_DIR}/patches/hello.loupe
+    ${CMAKE_CURRENT_LIST_DIR}/patches/meta-turing-machine.loupe
     ${CMAKE_CURRENT_LIST_DIR}/prelude.loupe
     ${CMAKE_CURRENT_LIST_DIR}/compiler/reader.js
     ${CMAKE_CURRENT_LIST_DIR}/compiler/expander.js
@@ -48,7 +48,7 @@ add_custom_command(
     COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/runtime/bake_factory.js
     DEPENDS ${FACTORY_INPUTS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
-    COMMENT "Baking factory_snapshot.h from patches/hello.loupe"
+    COMMENT "Baking factory_snapshot.h from patches/meta-turing-machine.loupe"
     VERBATIM
 )
 add_custom_target(bake_factory DEPENDS ${FACTORY_H})
