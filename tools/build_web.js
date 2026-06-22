@@ -201,6 +201,9 @@ for (const [, body] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
   catch (e) { if (e instanceof SyntaxError) throw new Error("emitted <script> has a syntax error: " + e.message); }
 }
 
-const outPath = path.join(ROOT, "web", "lens.html");
-fs.writeFileSync(outPath, html);
-console.log("built web/lens.html (" + (html.length / 1024).toFixed(0) + " KB)");
+// Write lens.html and an index.html copy so a GitHub Pages folder URL
+// (.../web/) serves the editor directly.
+for (const name of ["lens.html", "index.html"]) {
+  fs.writeFileSync(path.join(ROOT, "web", name), html);
+}
+console.log("built web/lens.html + web/index.html (" + (html.length / 1024).toFixed(0) + " KB)");

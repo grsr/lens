@@ -102,8 +102,9 @@
 ; ===========================================================================
 
 ; ---- value arithmetic ----------------------------------------------------
-(def add       (fn (:a :b)))
-(def sub       (fn (:a :b)))
+; add/sub take :sat to saturate at the value rails instead of wrapping.
+(def add       (fn (:a :b :sat)))
+(def sub       (fn (:a :b :sat)))
 (def mul       (fn (:a :gain)))
 (def div       (fn (:a :n)))
 (def mod       (fn (:a :n)))

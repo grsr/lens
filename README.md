@@ -62,26 +62,12 @@ seconds also saves whatever patch is currently running into flash.
 ## Example patches
 
 The patches in `patches/` are starting points, not a survey of the language.
-Each opens with a few comment lines saying what it does, what the knobs
-control, and what to patch where. A small sample:
-
-- `hello.loupe` — one sine, knob picks the pitch.
-- `hello-lfo.loupe` — a sine with an LFO sweeping the vibrato depth and speed.
-- `hello-seq.loupe` — a four-note arpeggio (the taste above).
-- `turing-machine.loupe` — a note loop that slowly rewrites itself.
-- `meta-turing-machine.loupe` — a Turing machine that mutates the transforms
-  applied to a fixed tune, not the notes themselves.
-- `discreet-system.loupe` — two scored voices through a feedback delay.
-- `just-a-kick.loupe` — a kick voice with full CV and knob control.
-- `drum-kit.loupe` — a four-voice kit written in Loupe.
-- `drum-machine.loupe` — a fuller multi-voice drum sequencer with two
-  switchable kits (straight and latin).
-- `fm-drum.loupe` — an FM percussion voice with three modes (kick, tom,
-  cymbal/cowbell) selected by the Z-switch.
-- `rungler.loupe` — a Benjolin-style patch of cross-modulating oscillators.
-- `patches/utility-pair/` — a folder of small `fn` files (low-pass gate,
-  wavefolder, sample-and-hold, slew, and more), a homage to Chris Johnson's
-  Utility-Pair card and a demo of the `(use)` library style.
+Each opens with a few comment lines saying what it does, what the knobs control,
+and what to patch where. Try `hello.loupe` (one sine, the knob picks the pitch)
+and `turing-machine.loupe` (a note loop that slowly rewrites itself), then browse
+the folder for the rest. The `patches/utility-pair/` subfolder holds small `fn`
+library files (low-pass gate, wavefolder, sample-and-hold, slew, and more), a
+homage to Chris Johnson's Utility-Pair card and a demo of the `(use)` style.
 
 Lens leans into the generative and feedback-driven side of modular, but it
 doesn't have to be used that way. It can just be a kick drum, an oscillator, a
@@ -117,8 +103,8 @@ drive called `RPI-RP2`; copy `lens.uf2` onto it.
 
 ## Dig in
 
-- [docs/loupe.md](docs/loupe.md) — the Loupe language guide.
-- [docs/developer_guide.md](docs/developer_guide.md) — the compiler, the
+- [docs/loupe.md](docs/loupe.md): the Loupe language guide.
+- [docs/developer_guide.md](docs/developer_guide.md): the compiler, the
   runtime, what runs where, and how to build and modify it.
 
 ## Acknowledgements
