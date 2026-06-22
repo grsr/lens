@@ -63,7 +63,8 @@ jobs:
       - name: JS smoke test
         run: |
           npm install --no-audit --no-fund
-          node attic/test.js
+          node compiler/validate.js
+          node tools/build_web.js
 
       - name: Resolve tag
         id: tag

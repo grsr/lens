@@ -3370,7 +3370,7 @@ async function refresh() {
     const lowered    = Lens.lower(expanded);
     const scheduled  = Lens.schedule(lowered);
     snapshot = Lens.encode(scheduled, lowered);
-    const nodeCount = lowered.nodes ? lowered.nodes.length : 0;
+    const nodeCount = lowered.slots ? lowered.slots.length : 0;
     say(nodeCount + " nodes · " + snapshot.length + " B"
         + (midiOut ? " · " + midiOut.name : " · not connected"), "ok");
   } catch (e) {

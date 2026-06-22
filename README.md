@@ -19,6 +19,9 @@ A patch speaks CV, gates and audio at the six jacks, so the card plays well
 with the rest of the Workshop System (or any rack, if you run the Computer
 standalone).
 
+**Try it in the browser:** [grsr.github.io/lens/web](https://grsr.github.io/lens/web/)
+(Chrome or Edge, edit a patch and send it to the card over WebMIDI).
+
 ## A taste
 
 A four-note minor arpeggio that steps once per beat. The voice comes out three
@@ -42,10 +45,10 @@ voltage. Every word is documented in [docs/loupe.md](docs/loupe.md).
 
 ## Use it
 
-The web editor is the easiest way in, and the one most people will want. Open
-it in Chrome or Edge (WebMIDI is needed), connect, pick an example from the
-dropdown, edit, and send it to the card. It can also save the patch into the
-card's flash so it survives a power cycle.
+The [web editor](https://grsr.github.io/lens/web/) is the easiest way in, and the
+one most people will want. Open it in Chrome or Edge (WebMIDI is needed), connect,
+pick an example from the dropdown, edit, and send it to the card. It can also save
+the patch into the card's flash so it survives a power cycle.
 
 For development and scripted flashing there is a Node CLI:
 
