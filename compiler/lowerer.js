@@ -597,11 +597,12 @@ function lower(expanded) {
   }
 
   // Resolve a jack expression (e.g. (pulse-in :1)) to its hw jack index.
+  // The jack number rides in kwargs as a flag (:1 / :2), matching the leaf
+  // lowering, so read it with jackLabel rather than from positional args.
   function jackIndexOf(j) {
     if (!j) return 0;
-    if (j.t === 'call') {
-      const n = j.args && j.args[0] && j.args[0].t === 'num' ? j.args[0].v : 1;
-      return JACK_INDEX[j.op + '-' + n] ?? 0;
+    if (j.t === 'call' && (j.op === 'cv-in' || j.op === 'audio-in' || j.op === 'pulse-in')) {
+      return JACK_INDEX[`${j.op}-${jackLabel(j.op, j.kwargs || {})}`] ?? 0;
     }
     if (j.t === 'sym') return JACK_INDEX[j.s] ?? 0;
     return 0;
