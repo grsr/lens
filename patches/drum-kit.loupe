@@ -30,10 +30,10 @@
   (def snare-t (onsets snare-beat beatclk))
   (def hat-t   (onsets hat-beat   beatclk))
 
-  (def kick  (tone-drum  kick-t  Ab2 60 10))
-  (def tom   (tone-drum  tom-t   G3  36 10))
-  (def snare (noise-drum snare-t 800  5))
-  (def hat   (noise-drum hat-t   4000 1))
+  (def kick  (tone-drum  :trig kick-t  :pitch Ab2 :sweep 60 :decay 10))
+  (def tom   (tone-drum  :trig tom-t   :pitch G3  :sweep 36 :decay 10))
+  (def snare (noise-drum :trig snare-t :cut 800  :decay 5))
+  (def hat   (noise-drum :trig hat-t   :cut 4000 :decay 1))
 
   (<- (audio-out :1) (wavefold (mix kick snare tom hat) (knob :main)))
   (<- (audio-out :2) (wavefold (mix kick snare tom hat) (knob :main)))

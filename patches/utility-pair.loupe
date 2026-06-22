@@ -11,8 +11,11 @@
 (patch
   (def ping-1 (normal (pulse-in :1) (onsets four-on-floor)))
   (def ping-2 (normal (pulse-in :2) (onsets four-on-floor)))
-  (<- (audio-out :1) (lopass-gate (audio-in :1) ping-1 (knob :x)))
-  (def wf (wavefolder (audio-in :2) (add (cv-in :2 :bipolar) (knob :y) :sat) ping-2 (add 2 (spread (knob :main) 5))))
+  (<- (audio-out :1) (lopass-gate :in (audio-in :1) :ping ping-1 :decay (knob :x)))
+  ; wavefolder: drive = CV-in 2 + knob Y (saturated); steps = 2..6 random levels (knob-main)
+  (def fold-drive (add (cv-in :2 :bipolar) (knob :y) :sat))
+  (def fold-steps (add 2 (spread (knob :main) 5)))
+  (def wf (wavefolder :in (audio-in :2) :drive fold-drive :trig ping-2 :steps fold-steps))
   (<- (audio-out :2) (wf :out))
   (<- (cv-out :2)    (wf :random))
   (<- (pulse-out :2) (wf :clock))
