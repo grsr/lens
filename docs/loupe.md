@@ -147,7 +147,8 @@ The runtime kernels live in `runtime/`.
 - **Logic and gates:** `if`, `chance`, `trig`, `fall`, `toggle`, `schmitt`, `hold`,
   `gate`, `diff`, `max`, `min`, `abs`, `rect`, `window`, `connected`, `normal`.
 - **Random:** `random`, `walk`, `spread`.
-- **Drums:** `kick`, `snare`, `hat`.
+- **Drums:** `kick`, `snare`, `hat`, and `groove`, a kit builder that triggers
+  each voice on its `:on` rhythm pattern and mixes them.
 - **Selection and routing:** `thru`, `squint`, `switch`.
 
 Most builtins take keyword arguments (`:cut`, `:trig`, `:scale`, `:decay`, and
