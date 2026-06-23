@@ -194,7 +194,7 @@ const html = `<!doctype html>
   <pre id="hl" aria-hidden="true"></pre>
   <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off">${starter.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</textarea>
 </main>
-<footer>edits compile as you type &middot; send = play it now &middot; save to card = survives power-off &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://github.com/grsr/lens/blob/main/docs/loupe.md" target="_blank">loupe docs</a></footer>
+<footer>edits compile as you type &middot; send = play it now &middot; save to card = survives power-off &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://grsr.github.io/lens/docs/loupe.html" target="_blank">loupe docs</a></footer>
 <script>
   window.addEventListener("error", function (e) {
     var s = document.getElementById("status");
