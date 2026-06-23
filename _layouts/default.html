@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}</title>
+<meta name="description" content="{{ page.description | default: site.description }}">
+<link rel="icon" href="{{ '/web/lens-logo.svg' | relative_url }}">
+<meta property="og:title" content="{{ page.title | default: site.title }}">
+<meta property="og:description" content="{{ page.description | default: site.description }}">
+<meta property="og:image" content="{{ '/web/social-card.png' | absolute_url }}">
+<style>
+  :root {
+    --bg:#14130f; --panel:#191712; --border:#34302a; --border2:#4a443a;
+    --text:#d8d2c4; --dim:#9c9482; --muted:#7d7668;
+    --green:#9fd08a; --purple:#c8a2d0; --amber:#d9b08c; --blue:#7e9ca8; --red:#e07a5f;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body {
+    margin: 0; color: var(--text); background: var(--bg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--green); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* top bar */
+  .topbar {
+    display: flex; align-items: center; gap: 18px;
+    padding: 12px 22px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: rgba(20,19,15,.92);
+    backdrop-filter: blur(6px); z-index: 10;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; color: var(--text); }
+  .brand:hover { text-decoration: none; }
+  .brand img { display: block; width: 30px; height: auto; }
+  .wm { font: 16px/1 ui-monospace, Menlo, monospace; letter-spacing: .02em; }
+  .wm .q { color: var(--amber); }
+  .wm .pl { color: var(--muted); }
+  .topbar nav { margin-left: auto; display: flex; gap: 18px; font-size: 14px; }
+  .topbar nav a { color: var(--dim); }
+  .topbar nav a:hover { color: var(--green); text-decoration: none; }
+
+  /* content */
+  main { max-width: 760px; margin: 0 auto; padding: 38px 22px 90px; }
+  main img { max-width: 100%; height: auto; }
+
+  h1, h2, h3, h4 { color: #e9e3d4; line-height: 1.25; font-weight: 650; margin: 1.9em 0 .6em; }
+  h1 { font-size: 2em; margin-top: .2em; }
+  h2 { font-size: 1.45em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.18em; }
+  h1 a, h2 a, h3 a, h4 a { color: inherit; }
+
+  p, li { color: var(--text); }
+  strong { color: #e9e3d4; }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 2.4em 0; }
+
+  blockquote {
+    margin: 1.4em 0; padding: .4em 1.1em; color: var(--dim);
+    border-left: 3px solid var(--border2); background: rgba(255,255,255,.015);
+  }
+  blockquote p { color: var(--dim); }
+
+  /* code */
+  code, pre, kbd { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  :not(pre) > code {
+    color: var(--amber); background: #211e18; border: 1px solid var(--border);
+    padding: .1em .4em; border-radius: 4px; font-size: .88em;
+  }
+  pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; overflow: auto; line-height: 1.5; font-size: .9em;
+  }
+  pre code { color: var(--text); background: none; border: 0; padding: 0; }
+
+  /* rouge syntax tokens, tuned to the editor palette */
+  .highlight .c, .highlight .c1, .highlight .cm, .highlight .cd { color: var(--muted); font-style: italic; }
+  .highlight .k, .highlight .kn, .highlight .kd, .highlight .kt, .highlight .nb, .highlight .nf, .highlight .nv { color: var(--purple); }
+  .highlight .s, .highlight .s1, .highlight .s2, .highlight .sb, .highlight .se { color: var(--green); }
+  .highlight .m, .highlight .mi, .highlight .mf, .highlight .mh { color: var(--amber); }
+  .highlight .o, .highlight .p { color: var(--dim); }
+  .highlight .n, .highlight .na, .highlight .nl { color: var(--text); }
+  .highlight .err { color: var(--red); }
+
+  /* tables */
+  table { border-collapse: collapse; margin: 1.4em 0; width: 100%; font-size: .94em; }
+  th, td { border: 1px solid var(--border); padding: 7px 12px; text-align: left; }
+  th { background: var(--panel); color: #e9e3d4; }
+
+  footer.site {
+    max-width: 760px; margin: 0 auto; padding: 26px 22px 50px;
+    border-top: 1px solid var(--border); color: var(--muted); font-size: 13px;
+  }
+  footer.site a { color: var(--dim); }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ '/' | relative_url }}">
+      <img src="{{ '/web/lens-logo.svg' | relative_url }}" alt="">
+      <span class="wm"><span class="q">'</span><span class="pl">(</span>lens<span class="pl">)</span></span>
+    </a>
+    <nav>
+      <a href="{{ '/docs/loupe.html' | relative_url }}">loupe</a>
+      <a href="{{ '/web/' | relative_url }}">editor</a>
+      <a href="https://github.com/grsr/lens">github</a>
+    </nav>
+  </header>
+
+  <main>
+    {{ content }}
+  </main>
+
+  <footer class="site">
+    <span class="wm"><span class="q">'</span><span class="pl">(</span>lens<span class="pl">)</span></span>
+    &nbsp;·&nbsp; {{ site.description }}
+  </footer>
+</body>
+</html>

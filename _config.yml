@@ -1,0 +1,39 @@
+title: lens
+description: a little language for the Music Thing Workshop System Computer
+url: "https://grsr.github.io"
+baseurl: "/lens"
+
+markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+
+# Rewrites relative .md links to their built .html URLs (works on github.com too).
+plugins:
+  - jekyll-relative-links
+
+# Theme every markdown page (README + docs) with the dark layout.
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Keep firmware/build/source out of the published site.
+exclude:
+  - attic/
+  - build/
+  - cli/
+  - compiler/
+  - runtime/
+  - tools/
+  - lens_run
+  - lens.uf2
+  - ComputerCard.h
+  - tusb_config.h
+  - usb_descriptors.c
+  - pico_sdk_import.cmake
+  - CMakeLists.txt
+  - info.yaml
+  - package.json
+  - package-lock.json
+  - prelude.loupe
