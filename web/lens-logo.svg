@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 232" width="240" height="232" role="img" aria-label="Lens">
+  <!-- Lens logo: a magnifying glass framing a stylised Workshop System Computer
+       (main knob, X/Y knobs + Z toggle, 4x3 jack grid, LEDs + card slot). -->
+  <defs>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9e3d4"/>
+      <stop offset="0.5" stop-color="#b8b1a0"/>
+      <stop offset="1" stop-color="#8a8474"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#cfc8b8"/>
+      <stop offset="1" stop-color="#7d7668"/>
+    </linearGradient>
+    <radialGradient id="knob" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#3c372f"/>
+      <stop offset="0.5" stop-color="#171410"/>
+      <stop offset="1" stop-color="#050403"/>
+    </radialGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e3ddcf"/>
+      <stop offset="0.5" stop-color="#9a9384"/>
+      <stop offset="1" stop-color="#6b655a"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.32" cy="0.26" r="0.85">
+      <stop offset="0" stop-color="#acd0e0" stop-opacity="0.18"/>
+      <stop offset="0.55" stop-color="#acd0e0" stop-opacity="0.02"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.22"/>
+    </radialGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="1.6"/>
+    </filter>
+    <clipPath id="glass"><circle cx="104" cy="100" r="67"/></clipPath>
+  </defs>
+
+  <!-- handle -->
+  <g>
+    <line x1="150" y1="146" x2="208" y2="204" stroke="#15130f" stroke-width="26" stroke-linecap="round"/>
+    <line x1="150" y1="146" x2="208" y2="204" stroke="url(#grip)" stroke-width="20" stroke-linecap="round"/>
+    <line x1="153" y1="149" x2="200" y2="196" stroke="#e9e3d4" stroke-width="5" stroke-linecap="round" opacity="0.55"/>
+  </g>
+
+  <!-- rim -->
+  <circle cx="104" cy="100" r="80" fill="url(#rim)"/>
+  <circle cx="104" cy="100" r="80" fill="none" stroke="#15130f" stroke-width="2"/>
+  <circle cx="104" cy="100" r="68" fill="#1b1813"/>
+
+  <!-- stylised Workshop System Computer, clipped inside the lens -->
+  <g clip-path="url(#glass)">
+    <!-- faceplate -->
+    <rect x="73" y="43" width="62" height="114" rx="9" fill="#26231c" stroke="#4a443a" stroke-width="1.5"/>
+
+    <!-- main knob -->
+    <circle cx="104" cy="62" r="14" fill="url(#knob)" stroke="#000000" stroke-width="1"/>
+    <ellipse cx="99" cy="56" rx="6.5" ry="4" fill="#ffffff" opacity="0.12"/>
+    <line x1="104" y1="62" x2="104" y2="51" stroke="#e9e3d4" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="104" cy="49" r="1.8" fill="#f4efe2"/>
+
+    <!-- X / Y knobs + Z toggle -->
+    <g>
+      <circle cx="88" cy="86" r="6" fill="url(#knob)" stroke="#000000" stroke-width="0.8"/>
+      <line x1="88" y1="86" x2="88" y2="81.5" stroke="#e9e3d4" stroke-width="1.7" stroke-linecap="round"/>
+      <circle cx="104" cy="86" r="6" fill="url(#knob)" stroke="#000000" stroke-width="0.8"/>
+      <line x1="104" y1="86" x2="104" y2="81.5" stroke="#e9e3d4" stroke-width="1.7" stroke-linecap="round"/>
+      <ellipse cx="121" cy="88" rx="4.4" ry="3" fill="url(#metal)" stroke="#4a443a" stroke-width="0.7"/>
+      <line x1="121" y1="87" x2="121" y2="81" stroke="url(#metal)" stroke-width="3.6" stroke-linecap="round"/>
+      <circle cx="121" cy="80.5" r="2.1" fill="#f0eada"/>
+    </g>
+
+    <!-- 4x3 jack grid -->
+    <g>
+      <g fill="url(#metal)" stroke="#2a2620" stroke-width="0.8">
+        <circle cx="82" cy="104" r="4.2"/><circle cx="96" cy="104" r="4.2"/><circle cx="110" cy="104" r="4.2"/><circle cx="124" cy="104" r="4.2"/>
+        <circle cx="82" cy="118" r="4.2"/><circle cx="96" cy="118" r="4.2"/><circle cx="110" cy="118" r="4.2"/><circle cx="124" cy="118" r="4.2"/>
+        <circle cx="82" cy="132" r="4.2"/><circle cx="96" cy="132" r="4.2"/><circle cx="110" cy="132" r="4.2"/><circle cx="124" cy="132" r="4.2"/>
+      </g>
+      <g fill="#0d0c0a">
+        <circle cx="82" cy="104" r="1.7"/><circle cx="96" cy="104" r="1.7"/><circle cx="110" cy="104" r="1.7"/><circle cx="124" cy="104" r="1.7"/>
+        <circle cx="82" cy="118" r="1.7"/><circle cx="96" cy="118" r="1.7"/><circle cx="110" cy="118" r="1.7"/><circle cx="124" cy="118" r="1.7"/>
+        <circle cx="82" cy="132" r="1.7"/><circle cx="96" cy="132" r="1.7"/><circle cx="110" cy="132" r="1.7"/><circle cx="124" cy="132" r="1.7"/>
+      </g>
+    </g>
+
+    <!-- LEDs, tucked into the bottom-left corner -->
+    <g filter="url(#glow)">
+      <g fill="#e0584a">
+        <circle cx="81" cy="142" r="2"/><circle cx="88" cy="142" r="2"/>
+        <circle cx="81" cy="148" r="2"/><circle cx="88" cy="148" r="2"/>
+        <circle cx="81" cy="154" r="2"/><circle cx="88" cy="154" r="2"/>
+      </g>
+    </g>
+    <g fill="#ff7d6c">
+      <circle cx="81" cy="142" r="1.1"/><circle cx="88" cy="148" r="1.1"/>
+    </g>
+
+    <!-- card-edge connector -->
+    <line x1="105" y1="150" x2="123" y2="150" stroke="#9a9384" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <!-- glass tint + glare -->
+  <g clip-path="url(#glass)">
+    <circle cx="104" cy="100" r="67" fill="url(#sheen)"/>
+    <path d="M60 56 A67 67 0 0 1 148 52 L138 62 A52 52 0 0 0 70 66 Z" fill="#ffffff" opacity="0.12"/>
+  </g>
+
+  <!-- inner rim seat -->
+  <circle cx="104" cy="100" r="68" fill="none" stroke="#15130f" stroke-width="2" opacity="0.8"/>
+  <circle cx="104" cy="100" r="65.5" fill="none" stroke="#e9e3d4" stroke-width="1" opacity="0.25"/>
+</svg>

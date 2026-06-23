@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="web/social-card.png" alt="Lens" width="600">
+</p>
+
 # Lens
 
 > **0.1 alpha.** Lens is early and shared so people can start playing with it,

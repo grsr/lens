@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1076 445" width="1076" height="445">
+  <rect width="1076" height="445" fill="#14130f"/>
+  <image xlink:href="lens-logo.svg" x="35" y="41" width="370" height="370"/>
+  <text x="470" y="273" font-family="Menlo, ui-monospace, monospace" font-size="128" letter-spacing="8">
+    <tspan fill="#d9b08c">'</tspan><tspan fill="#7d7668">(</tspan><tspan fill="#d8d2c4">lens</tspan><tspan fill="#7d7668">)</tspan>
+  </text>
+</svg>
