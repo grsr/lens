@@ -153,12 +153,17 @@ const html = `<!doctype html>
   html { background: #14130f; }
   body { margin: 0; height: 100vh; display: flex; flex-direction: column;
          color: #d8d2c4; font: 13px/1.45 ui-monospace, Menlo, monospace; }
-  header { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
-           border-bottom: 1px solid #34302a; flex-wrap: wrap; }
-  header .brand { display: flex; align-items: center; gap: 8px; margin-right: 6px; color: inherit; text-decoration: none; }
-  header .brand img { width: 26px; height: auto; display: block; }
-  header .brand .wm { font-size: 15px; letter-spacing: .02em; }
-  header .brand:hover .wm { color: #9fd08a; }
+  .topbar { display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+            border-bottom: 1px solid #34302a; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
+  .brand img { width: 26px; height: auto; display: block; }
+  .brand .wm { font-size: 15px; letter-spacing: .02em; }
+  .brand:hover .wm { color: #9fd08a; }
+  .topbar nav { margin-left: auto; display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+  .topbar nav a { color: #9c9482; text-decoration: none; }
+  .topbar nav a:hover { color: #9fd08a; }
+  .toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+             border-bottom: 1px solid #34302a; flex-wrap: wrap; }
   button, select { background: #2a2720; color: #d8d2c4; border: 1px solid #4a443a;
            border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
   button:hover { border-color: #7d7668; }
@@ -183,8 +188,17 @@ const html = `<!doctype html>
   footer { padding: 6px 16px; border-top: 1px solid #34302a; color: #7d7668; }
   footer a { color: #9c9482; }
 </style>
-<header>
+<header class="topbar">
   <a class="brand" href="https://grsr.github.io/lens/" title="Lens docs"><img src="lens-logo.svg" alt=""><span class="wm"><span class="num">'</span><span class="cmt">(</span>lens<span class="cmt">)</span></span></a>
+  <nav>
+    <a href="https://grsr.github.io/lens/docs/loupe.html">loupe</a>
+    <a href="https://grsr.github.io/lens/docs/prelude.html">prelude</a>
+    <a href="https://grsr.github.io/lens/docs/developer_guide.html">dev guide</a>
+    <a href="https://github.com/grsr/lens/releases/latest/download/lens.uf2">download .uf2</a>
+    <a href="https://github.com/grsr/lens">github</a>
+  </nav>
+</header>
+<div class="toolbar">
   <select id="picker"></select>
   <button id="open">open…</button><button id="save">download</button>
   <input id="filepick" type="file" accept=".loupe" style="display:none">
@@ -192,7 +206,7 @@ const html = `<!doctype html>
   <button id="send" disabled>send</button>
   <button id="savecard" disabled title="writes the patch to the card's flash; the card reboots">save to card</button>
   <span id="status"></span>
-</header>
+</div>
 <main>
   <pre id="hl" aria-hidden="true"></pre>
   <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off">${starter.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</textarea>
