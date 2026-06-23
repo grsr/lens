@@ -465,7 +465,7 @@ Some things you might expect to be Loupe builtins are C kernels in `runtime/`:
 oscillators, filters, the wavefolder, envelopes, the drum voices, the delay-line
 read. These are hot per-sample DSP, and writing them in C keeps the audio loop
 fast enough to hold 48 kHz. The C runtime is the source of truth for what they
-do; the JavaScript interpreter exists for development.
+do.
 
 The compositional work stays in Loupe: routing, gates and conditional logic,
 clock derivation, anything that wires existing primitives together. The line is

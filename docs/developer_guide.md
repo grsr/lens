@@ -4,8 +4,7 @@ For people who want to read, build, or modify Lens. If you only want to write
 patches, read [loupe.md](loupe.md) instead.
 
 This guide is the map. When it disagrees with the code, the code wins. The C
-runtime in particular is the source of truth for what every kernel does; the
-JavaScript interpreter exists to support development.
+runtime in particular is the source of truth for what every kernel does.
 
 ## Repo layout
 
