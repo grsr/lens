@@ -221,3 +221,25 @@ for (const name of ["lens.html", "index.html"]) {
   fs.writeFileSync(path.join(ROOT, "web", name), html);
 }
 console.log("built web/lens.html + web/index.html (" + (html.length / 1024).toFixed(0) + " KB)");
+
+// Publish an always-current, syntax-highlighted copy of the prelude as a docs page.
+// Generated from prelude.loupe so the docs site never drifts from the real environment.
+const preludeBody = preludeText.endsWith("\n") ? preludeText : preludeText + "\n";
+const preludeDoc = `---
+title: prelude
+description: The standard environment every patch starts with.
+---
+
+<!-- generated from prelude.loupe by tools/build_web.js; do not edit by hand -->
+
+# Prelude
+
+\`prelude.loupe\` is the standard environment every patch starts with: constants, pitch
+names, helper functions, the builtin op surface, scales, chords, rhythms, and pattern
+builders. Every definition here can be shadowed by redefining it in your own patch.
+
+\`\`\`clojure
+${preludeBody}\`\`\`
+`;
+fs.writeFileSync(path.join(ROOT, "docs", "prelude.md"), preludeDoc);
+console.log("built docs/prelude.md from prelude.loupe");
