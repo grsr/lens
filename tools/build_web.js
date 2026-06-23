@@ -164,6 +164,8 @@ const html = `<!doctype html>
   .topbar nav a { color: #9c9482; text-decoration: none; }
   .topbar nav a:hover { color: #9fd08a; }
   .topbar nav a[aria-current] { color: #d8d2c4; }
+  .topbar nav a.dl { color: #d8d2c4; border: 1px solid #4a443a; border-radius: 5px; padding: 2px 9px; }
+  .topbar nav a.dl:hover { border-color: #7d7668; color: #9fd08a; }
   .toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
              border-bottom: 1px solid #34302a; flex-wrap: wrap; }
   button, select { background: #2a2720; color: #d8d2c4; border: 1px solid #4a443a;
@@ -200,8 +202,8 @@ const html = `<!doctype html>
     <a href="https://grsr.github.io/lens/docs/prelude.html">prelude</a>
     <a href="https://grsr.github.io/lens/docs/developer_guide.html">dev guide</a>
     <a href="https://grsr.github.io/lens/web/" aria-current="page">patch editor</a>
-    <a href="https://github.com/grsr/lens/releases/latest/download/lens.uf2">download .uf2</a>
     <a href="https://github.com/grsr/lens">github</a>
+    <a class="dl" href="https://github.com/grsr/lens/releases/latest/download/lens.uf2" download title="downloads the latest firmware (.uf2)">download .uf2 ↓</a>
   </nav>
 </header>
 <div class="toolbar">

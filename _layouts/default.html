@@ -41,6 +41,9 @@
   .topbar nav { margin-left: auto; display: flex; gap: 18px; font-size: 14px; }
   .topbar nav a { color: var(--dim); }
   .topbar nav a:hover { color: var(--green); text-decoration: none; }
+  .topbar nav a[aria-current] { color: var(--text); }
+  .topbar nav a.dl { color: var(--text); border: 1px solid var(--border2); border-radius: 5px; padding: 2px 9px; }
+  .topbar nav a.dl:hover { border-color: var(--muted); color: var(--green); }
 
   /* content */
   main { max-width: 760px; margin: 0 auto; padding: 38px 22px 90px; }
@@ -108,12 +111,12 @@
       <span class="wm"><span class="q">'</span><span class="pl">(</span>lens<span class="pl">)</span></span>
     </a>
     <nav>
-      <a href="{{ '/docs/loupe.html' | relative_url }}">loupe</a>
-      <a href="{{ '/docs/prelude.html' | relative_url }}">prelude</a>
-      <a href="{{ '/docs/developer_guide.html' | relative_url }}">dev guide</a>
+      <a href="{{ '/docs/loupe.html' | relative_url }}"{% if page.url == '/docs/loupe.html' %} aria-current="page"{% endif %}>loupe</a>
+      <a href="{{ '/docs/prelude.html' | relative_url }}"{% if page.url == '/docs/prelude.html' %} aria-current="page"{% endif %}>prelude</a>
+      <a href="{{ '/docs/developer_guide.html' | relative_url }}"{% if page.url == '/docs/developer_guide.html' %} aria-current="page"{% endif %}>dev guide</a>
       <a href="{{ '/web/' | relative_url }}">patch editor</a>
-      <a href="https://github.com/grsr/lens/releases/latest/download/lens.uf2">download .uf2</a>
       <a href="https://github.com/grsr/lens">github</a>
+      <a class="dl" href="https://github.com/grsr/lens/releases/latest/download/lens.uf2" download title="downloads the latest firmware (.uf2)">download .uf2 ↓</a>
     </nav>
   </header>
 
