@@ -155,9 +155,10 @@ const html = `<!doctype html>
          color: #d8d2c4; font: 13px/1.45 ui-monospace, Menlo, monospace; }
   header { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
            border-bottom: 1px solid #34302a; flex-wrap: wrap; }
-  header h1 { font-size: 15px; letter-spacing: .02em; margin: 0 10px 0 0; }
-  header h1 a { color: inherit; text-decoration: none; }
-  header h1 a:hover { color: #9fd08a; }
+  header .brand { display: flex; align-items: center; gap: 8px; margin-right: 6px; color: inherit; text-decoration: none; }
+  header .brand img { width: 26px; height: auto; display: block; }
+  header .brand .wm { font-size: 15px; letter-spacing: .02em; }
+  header .brand:hover .wm { color: #9fd08a; }
   button, select { background: #2a2720; color: #d8d2c4; border: 1px solid #4a443a;
            border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
   button:hover { border-color: #7d7668; }
@@ -183,7 +184,7 @@ const html = `<!doctype html>
   footer a { color: #9c9482; }
 </style>
 <header>
-  <h1><a href="https://grsr.github.io/lens/" title="Lens docs"><span class="num">'</span><span class="cmt">(</span>lens<span class="cmt">)</span></a></h1>
+  <a class="brand" href="https://grsr.github.io/lens/" title="Lens docs"><img src="lens-logo.svg" alt=""><span class="wm"><span class="num">'</span><span class="cmt">(</span>lens<span class="cmt">)</span></span></a>
   <select id="picker"></select>
   <button id="open">open…</button><button id="save">download</button>
   <input id="filepick" type="file" accept=".loupe" style="display:none">
