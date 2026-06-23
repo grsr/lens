@@ -153,13 +153,14 @@ const html = `<!doctype html>
   html { background: #14130f; }
   body { margin: 0; height: 100vh; display: flex; flex-direction: column;
          color: #d8d2c4; font: 13px/1.45 ui-monospace, Menlo, monospace; }
-  .topbar { display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+  .topbar { display: flex; align-items: center; gap: 18px; padding: 12px 22px;
             border-bottom: 1px solid #34302a; flex-wrap: wrap; }
-  .brand { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
-  .brand img { width: 26px; height: auto; display: block; }
-  .brand .wm { font-size: 15px; letter-spacing: .02em; }
+  .brand { display: flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
+  .brand img { width: 30px; height: auto; display: block; }
+  .brand .wm { font: 16px/1 ui-monospace, Menlo, monospace; letter-spacing: .02em; }
   .brand:hover .wm { color: #9fd08a; }
-  .topbar nav { margin-left: auto; display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+  .topbar nav { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap;
+                font: 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
   .topbar nav a { color: #9c9482; text-decoration: none; }
   .topbar nav a:hover { color: #9fd08a; }
   .toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
