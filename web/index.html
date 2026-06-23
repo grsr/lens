@@ -1,14 +1,15 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>lens — patch loader</title>
+<title>'(lens) · patch loader</title>
+<link rel="icon" href="lens-logo.svg">
 <style>
   html { background: #14130f; }
   body { margin: 0; height: 100vh; display: flex; flex-direction: column;
          color: #d8d2c4; font: 13px/1.45 ui-monospace, Menlo, monospace; }
   header { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
            border-bottom: 1px solid #34302a; flex-wrap: wrap; }
-  header h1 { font-size: 14px; letter-spacing: .18em; margin: 0 10px 0 0; }
+  header h1 { font-size: 15px; letter-spacing: .02em; margin: 0 10px 0 0; }
   button, select { background: #2a2720; color: #d8d2c4; border: 1px solid #4a443a;
            border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
   button:hover { border-color: #7d7668; }
@@ -34,7 +35,7 @@
   footer a { color: #9c9482; }
 </style>
 <header>
-  <h1>LENS</h1>
+  <h1><span class="num">'</span><span class="cmt">(</span>lens<span class="cmt">)</span></h1>
   <select id="picker"></select>
   <button id="open">open…</button><button id="save">download</button>
   <input id="filepick" type="file" accept=".loupe" style="display:none">
