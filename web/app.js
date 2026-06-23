@@ -1,4 +1,4 @@
-// web/app.js — Lens patch loader UI.
+// web/app.js: Lens patch editor UI.
 // Inlined by tools/build_web.js after the bundled compiler (global `Lens`)
 // and embedded example patches (global `EXAMPLES`).
 // Requires a secure context for WebMIDI (https or localhost).
@@ -140,7 +140,7 @@ async function saveToCard() {
     midiOut.send([...Lens.frame(Lens.CMD.SAVE_STATE)]);
     const m = await recv(3000);
     if (m.cmd !== Lens.CMD.ACK) throw new Error("save refused");
-    say("saved · card is rebooting — reconnect in a moment", "ok");
+    say("saved · card is rebooting, reconnect in a moment", "ok");
     btnConnect.textContent = "connect"; midiOut = midiIn = null;
   } catch (e) { say(e.message, "err"); }
   refresh();

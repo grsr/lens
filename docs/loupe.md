@@ -51,9 +51,9 @@ audio or open a filter.
 Three constants are always in scope, written in capitals by convention (capitals
 mean a constant):
 
-- `VMIN` (0) — floor, "off".
-- `VMID` (2048) — bipolar centre, "middle".
-- `VMAX` (4095) — ceiling, "full".
+- `VMIN` (0): floor, "off".
+- `VMID` (2048): bipolar centre, "middle".
+- `VMAX` (4095): ceiling, "full".
 
 `OCTAVE` is 12. Note names like `C3`, `Eb4`, `G#2` are bound in the prelude as
 ordinary MIDI numbers, so you can use them in any arithmetic expression:
@@ -73,26 +73,26 @@ direction-typed: reading an output or writing an input is a compile error.
 
 **Inputs** (used in value position):
 
-- `(cv-in :1)` — a CV input, unipolar 0..VMAX (an unpatched jack reads the
+- `(cv-in :1)`: a CV input, unipolar 0..VMAX (an unpatched jack reads the
   midpoint). `(cv-in :1 :bipolar)` centres on 0 (unpatched reads 0), which is
   what you want when you sum a CV onto a knob as modulation. `(cv-in :1 :v-oct)`
   reads the jack as a pitch.
-- `(audio-in :1)` — an audio input.
-- `(pulse-in :1)` — a pulse/gate input.
-- `(knob :main)` / `(knob :x)` / `(knob :y)` — the three knobs. Detented by
+- `(audio-in :1)`: an audio input.
+- `(pulse-in :1)`: a pulse/gate input.
+- `(knob :main)` / `(knob :x)` / `(knob :y)`: the three knobs. Detented by
   default at the rails and centre so they snap cleanly past ADC jitter. Pass
   `:detent 0` to read the raw pot, or `:detent N` to set the snap zone
   half-width.
-- `(switch :z)` — the Z-switch. Returns one of the three rails (`VMIN` down,
+- `(switch :z)`: the Z-switch. Returns one of the three rails (`VMIN` down,
   `VMID` middle, `VMAX` up), so a switch is a three-position knob in the same
   value domain.
 
 **Outputs** (used as the sink, the left side of a `<-`):
 
-- `(<- (cv-out :1) expr)` — a CV output. `:bipolar` is available here too.
+- `(<- (cv-out :1) expr)`: a CV output. `:bipolar` is available here too.
 - `(<- (audio-out :1) expr)`
 - `(<- (pulse-out :1) expr)`
-- `(<- (led :0) expr)` — the panel LEDs, 0..5.
+- `(<- (led :0) expr)`: the panel LEDs, 0..5.
 
 There are no bare aliases like `cv-out-1`. If you want the brevity, define your
 own: `(def out (cv-out :1 :bipolar))`.
@@ -321,7 +321,7 @@ can also place the delay yourself with `(z1 X)` when the placement matters:
 
 Tape feedback is the obvious case: the dub delay writing audio into a buffer and
 reading it back, the Turing machine writing each new step into the loop it read
-from. That is ordinary tape semantics — writes commit at end of tick, reads see
+from. That is ordinary tape semantics. Writes commit at end of tick, reads see
 the previous tick's state. Between the two you get delay lines and reverbs,
 resonant and self-oscillating filters (resonance is feedback), Karplus-Strong
 plucks, self-mutating sequencers, anything with a loop you want to close.

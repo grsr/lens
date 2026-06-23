@@ -7,7 +7,7 @@
 //   sampleRate: [{ slotId, core }] in one global topological order (all slots)
 //   writerMap: Map< `${slotId}.${field}`, slotId >
 //   violations: single-writer violation list (empty if clean)
-//   terminalFeedReport: [{ slotId, kernel, core, jack, accepted }] — one entry per
+//   terminalFeedReport: [{ slotId, kernel, core, jack, accepted }]: one entry per
 //       source slot feeding a terminal write; accepted=true if moved to Core 0
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@
 // ---------------------------------------------------------------------------
 const STUB_KERNELS = [
   {
-    // thru with :on — the expander inlines op-lens calls so the full pipeline
+    // thru with :on: the expander inlines op-lens calls so the full pipeline
     // never emits op_thru with in[2]. This entry catches manual graph construction
     // or future lowering paths that miss the expander rewrite.
     kernel: 'op_thru',
@@ -343,7 +343,7 @@ function terminalFeedPass(sortedSlots, coreOf, terminalWriteIds) {
     const jacks = sourceToJack.get(slotId) || [];
 
     if (currentCore === 0) {
-      // Already on Core 0 — no action needed.
+      // Already on Core 0, no action needed.
       report.push({ slotId, kernel: slot ? slot.kernel : '?', core: 0, jacks, accepted: true, moved: false });
       continue;
     }
@@ -435,7 +435,7 @@ function schedule(graph) {
     for (const [label, r] of [['core0', budget.core0], ['core1', budget.core1]]) {
       if (!r.ok) parts.push(`${label}: sr=${r.sr}+overhead=${r.overhead}=${r.total} > budget=${r.budget}`);
     }
-    budget.warning = `cycle budget exceeded — ${parts.join('; ')}`;
+    budget.warning = `cycle budget exceeded: ${parts.join('; ')}`;
   }
 
   // Stub-kernel scan: refuse to schedule any patch that contains a known stub.
@@ -450,7 +450,7 @@ function schedule(graph) {
   }
   if (stubHits.length > 0) {
     const lines = stubHits.map(
-      h => `  slot ${h.slotId}: ${h.kernel} — gap: "${h.gap}"`
+      h => `  slot ${h.slotId}: ${h.kernel}, gap: "${h.gap}"`
     );
     throw new Error(
       `patch uses unimplemented language features (see SPECS/language-gaps.md):\n` +

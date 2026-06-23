@@ -112,7 +112,7 @@ function encode(scheduled, graph) {
     const lines = scheduled.violations.map(v =>
       `  slot ${v.slot} field "${v.field}" (kind: ${v.kind}, other: ${v.otherSlot})`
     ).join('\n');
-    throw new Error(`single-writer violation(s) — cannot encode dual-core snapshot:\n${lines}`);
+    throw new Error(`single-writer violation(s): cannot encode dual-core snapshot:\n${lines}`);
   }
 
   const slotMap = new Map(graph.slots.map(s => [s.id, s]));

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// tools/build_web.js — assemble compiler modules + example patches + web/app.js
+// tools/build_web.js: assemble compiler modules + example patches + web/app.js
 // into a single-file HTML bundle at web/lens.html.
 // WebMIDI requires a secure context (https or localhost).
 //
@@ -13,7 +13,7 @@ const ROOT   = path.join(__dirname, "..");
 const LENS = ROOT;
 const readSrc = (f) => fs.readFileSync(f, "utf8").replace(/^#![^\n]*\n/, "");
 
-// Lens compiler modules — order matters: each require must resolve against an earlier def.
+// Lens compiler modules, order matters: each require must resolve against an earlier def.
 const MODULES = [
   "compiler/reader.js",
   "compiler/expander.js",
@@ -147,7 +147,7 @@ const starter = examples["hello"];
 const html = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>'(lens) · patch loader</title>
+<title>'(lens) · patch editor</title>
 <link rel="icon" href="lens-logo.svg">
 <style>
   html { background: #14130f; }

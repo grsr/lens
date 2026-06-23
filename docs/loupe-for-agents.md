@@ -92,7 +92,7 @@ See docs/loupe.md for the full reference. Essential forms:
 `(add a b)` `(sub a b)` `(mul a b)` `(div a n)` `(mod a n)` `(spread in n)`
 `(invert in)` `(shift in by)` `(mask in m)` `(bit in n)`
 `(and a b)` `(or a b)` `(xor a b)` `(not x)`
-`(gt a b)` `(lt a b)` `(eq a b)` `(ne a b)` — return 0 or VMAX
+`(gt a b)` `(lt a b)` `(eq a b)` `(ne a b)`: return 0 or VMAX
 `(if cond then else)` `(max a b)` `(min a b)` `(abs x)` `(rect x)` `(window a lo hi)`
 
 ### Oscillators and noise
@@ -138,9 +138,9 @@ A slow oscillator is an LFO. `(triangle :rate (knob :y))` is a gentle modulator.
 
 ### Randomness
 
-`(random :trig c)` — 0..VMAX per tick. Map before use: `(add C3 (spread (random) 25))`.
-`(chance p :trig c)` — true with probability `p` (0..VMAX) per tick.
-`(walk :step s :trig c)` — random walk.
+`(random :trig c)`: 0..VMAX per tick. Map before use: `(add C3 (spread (random) 25))`.
+`(chance p :trig c)`: true with probability `p` (0..VMAX) per tick.
+`(walk :step s :trig c)`: random walk.
 
 ### Tapes and sequencing
 
@@ -156,9 +156,9 @@ Cable into a tape to rewrite it live: `(<- seq (if (chance ...) (step seq) (rand
 
 ### Delays and wavetables
 
-`(audio :seconds 1.7)` — buffer. Write with `<- ... :per-sample`.
-`(tap buf :amount a :span)` — read at a delay. `:span` makes `:amount` a fraction of length.
-`(wave tape :pos p)` — wavetable read.
+`(audio :seconds 1.7)`: buffer. Write with `<- ... :per-sample`.
+`(tap buf :amount a :span)`: read at a delay. `:span` makes `:amount` a fraction of length.
+`(wave tape :pos p)`: wavetable read.
 
 ### Pitch and scales
 
@@ -169,9 +169,9 @@ Chords (offsets from root): `maj3 min3 dim aug sus2 sus4 maj7 min7 dom7 dim7`
 
 ### Lenses and selection
 
-`(lens a b c)` — a fixed list of values, tapes, or one-argument fns.
-`(thru list idx)` — the idx-th cell, wrapping out of range.
-`(squint list sel)` — spreads a 0..VMAX selector across the list (knob to cell).
+`(lens a b c)`: a fixed list of values, tapes, or one-argument fns.
+`(thru list idx)`: the idx-th cell, wrapping out of range.
+`(squint list sel)`: spreads a 0..VMAX selector across the list (knob to cell).
 
 A lens of fns: `((thru ops idx) note)` runs the idx-th transform.
 A lens of tapes: `(onsets (thru (lens four-on-floor son-clave) idx) :trig clk)`.
@@ -181,7 +181,7 @@ A lens of tapes: `(onsets (thru (lens four-on-floor son-clave) idx) :trig clk)`.
 `(kick :trig t :note A1 :decay d :drive dr :sweep s)`
 `(snare :trig t :note C3 :decay d :snappy sn :tone to)`
 `(hat :trig t :note A5 :decay d :tone to)`
-`(groove :trig c (kick :on four-on-floor ...) (snare :on backbeat ...) ...)` — triggers each voice from a rhythm tape and mixes them.
+`(groove :trig c (kick :on four-on-floor ...) (snare :on backbeat ...) ...)`: triggers each voice from a rhythm tape and mixes them.
 
 Rhythms: `four-on-floor backbeat eighths offbeat sixteenths downbeat tresillo cinquillo habanera son-clave rumba-clave bossa`
 

@@ -1,5 +1,5 @@
 'use strict';
-// op-table.js — single source of truth for op->kernel wiring.
+// op-table.js: single source of truth for op->kernel wiring.
 // Each row: { kernel?, inputs:[{kw,default,aliases?}], param0?:[{kw,shift,width,default?}] }
 // inputs in slot order (in0, in1, ...). param0 fields are STRUCTURAL numeric params only.
 
