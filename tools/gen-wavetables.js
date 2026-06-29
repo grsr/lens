@@ -1,0 +1,171 @@
+'use strict';
+/* Generate runtime/wavetables.h: three factory wavetables.
+   Table 0: saw->square sweep (additive, bandlimited).
+   Table 1: sine->bright additive (increasing harmonic count).
+   Table 2: formant/vocal (shifting vowel-like spectra).
+   Each table has 32 waves of WT_LEN=256 int16 samples (-32767..32767). */
+const fs   = require('fs');
+const path = require('path');
+
+const WT_LEN  = 256;
+const N_WAVES = 32;
+const AMP     = 32767;
+
+function clamp16(x) {
+  if (x > 32767) return 32767;
+  if (x < -32767) return -32767;
+  return Math.round(x);
+}
+
+/* Table 0: saw -> square additive morph.
+   wave 0 = pure sawtooth (odd+even harmonics), wave 31 = square (odd only).
+   Crossfade by suppressing even harmonics as index rises. */
+function makeSawSquare() {
+  const waves = [];
+  for (let w = 0; w < N_WAVES; w++) {
+    const t = w / (N_WAVES - 1);  /* 0 = saw, 1 = square */
+    const samples = new Array(WT_LEN);
+    for (let i = 0; i < WT_LEN; i++) {
+      let sum = 0;
+      const maxH = 64;
+      for (let k = 1; k <= maxH; k++) {
+        const phase = 2 * Math.PI * k * i / WT_LEN;
+        const isOdd = (k % 2 === 1);
+        /* saw: 1/k for all k; square: 1/k for odd k only.
+           Morph: even harmonics scale from (1-t) to 0. */
+        const scale = isOdd ? 1.0 : (1.0 - t);
+        /* saw sign is negative for correct waveform direction */
+        sum += -scale / k * Math.sin(phase);
+      }
+      /* normalise: ideal saw peak is pi/2 * GIBBS ~ 1.852 for 64 harmonics */
+      samples[i] = clamp16(sum * AMP * 2 / Math.PI);
+    }
+    waves.push(samples);
+  }
+  return waves;
+}
+
+/* Table 1: sine -> bright additive morph.
+   wave 0 = pure sine, wave 31 = sum of many harmonics (1/k^0.5 rolloff). */
+function makeSineBright() {
+  const waves = [];
+  for (let w = 0; w < N_WAVES; w++) {
+    const t = w / (N_WAVES - 1);
+    /* number of harmonics: 1 .. 32 */
+    const nH = Math.max(1, Math.round(1 + t * 31));
+    const samples = new Array(WT_LEN);
+    let peak = 0;
+    const raw = new Array(WT_LEN);
+    for (let i = 0; i < WT_LEN; i++) {
+      let sum = 0;
+      for (let k = 1; k <= nH; k++) {
+        const phase = 2 * Math.PI * k * i / WT_LEN;
+        /* 1/sqrt(k) rolloff */
+        sum += Math.sin(phase) / Math.sqrt(k);
+      }
+      raw[i] = sum;
+      if (Math.abs(sum) > peak) peak = Math.abs(sum);
+    }
+    for (let i = 0; i < WT_LEN; i++) {
+      samples[i] = clamp16(raw[i] / peak * AMP);
+    }
+    waves.push(samples);
+  }
+  return waves;
+}
+
+/* Table 2: formant/vocal -- vowel-like spectra shifting across the table.
+   Five vowel-ish formant centres sweep from A(730,1090,2440) to U(300,870,2240).
+   Implementation: sum of modulated sinusoids, each shaped by a Gaussian
+   envelope around the formant frequency. */
+function makeFormant() {
+  const sr = 48000;
+  /* 5 vowel formant sets: [f1,f2,f3] in Hz */
+  const vowels = [
+    [730,  1090, 2440],   /* A */
+    [270,  2290, 3010],   /* E */
+    [390,  1990, 2550],   /* I */
+    [570,  840,  2410],   /* O */
+    [300,  870,  2240],   /* U */
+  ];
+  const waves = [];
+  for (let w = 0; w < N_WAVES; w++) {
+    const t = w / (N_WAVES - 1);
+    /* morph through vowels */
+    const vi = t * (vowels.length - 1);
+    const vi0 = Math.floor(vi), vi1 = Math.min(vi0 + 1, vowels.length - 1);
+    const vt = vi - vi0;
+    const formants = vowels[vi0].map((f, j) => f + (vowels[vi1][j] - f) * vt);
+
+    /* build spectrum: for each bin, sum Gaussian contributions from each formant */
+    /* fundamental freq for WT_LEN=256 at 48kHz */
+    const f0 = sr / WT_LEN;
+    const raw = new Array(WT_LEN).fill(0);
+    const bw = 80;  /* formant bandwidth Hz */
+    for (let k = 1; k < WT_LEN / 2; k++) {
+      const fk = k * f0;
+      let amp = 0;
+      for (const ff of formants) {
+        amp += Math.exp(-0.5 * Math.pow((fk - ff) / bw, 2));
+      }
+      for (let i = 0; i < WT_LEN; i++) {
+        raw[i] += amp * Math.sin(2 * Math.PI * k * i / WT_LEN);
+      }
+    }
+    let peak = 0;
+    for (let i = 0; i < WT_LEN; i++) if (Math.abs(raw[i]) > peak) peak = Math.abs(raw[i]);
+    const samples = new Array(WT_LEN);
+    for (let i = 0; i < WT_LEN; i++) {
+      samples[i] = peak > 0 ? clamp16(raw[i] / peak * AMP) : 0;
+    }
+    waves.push(samples);
+  }
+  return waves;
+}
+
+function emitTable(lines, name, waves) {
+  lines.push(`static const int16_t ${name}[${N_WAVES}][${WT_LEN}] = {`);
+  for (let w = 0; w < waves.length; w++) {
+    lines.push('    {');
+    const samps = waves[w];
+    for (let i = 0; i < samps.length; i += 16) {
+      const chunk = samps.slice(i, i + 16).join(', ');
+      lines.push('        ' + chunk + (i + 16 < samps.length ? ',' : ''));
+    }
+    lines.push('    }' + (w + 1 < waves.length ? ',' : ''));
+  }
+  lines.push('};');
+  lines.push('');
+}
+
+const lines = [];
+lines.push('#pragma once');
+lines.push('#include <stdint.h>');
+lines.push('/* generated by tools/gen-wavetables.js -- do not edit */');
+lines.push('#ifndef __not_in_flash');
+lines.push('#define __not_in_flash(group) /* host build: no-op */');
+lines.push('#endif');
+lines.push('');
+lines.push('#define WT_LEN 256');
+lines.push('#define WT_N_WAVES 32');
+lines.push('#define WT_NUM_TABLES 3');
+lines.push('');
+
+const t0 = makeSawSquare();
+const t1 = makeSineBright();
+const t2 = makeFormant();
+
+emitTable(lines, 'WT_TABLE_0', t0);
+emitTable(lines, 'WT_TABLE_1', t1);
+emitTable(lines, 'WT_TABLE_2', t2);
+
+lines.push('static const int16_t * const WT_TABLES[WT_NUM_TABLES] = {');
+lines.push('    &WT_TABLE_0[0][0],');
+lines.push('    &WT_TABLE_1[0][0],');
+lines.push('    &WT_TABLE_2[0][0],');
+lines.push('};');
+lines.push('');
+
+const out = path.join(__dirname, '../runtime/wavetables.h');
+fs.writeFileSync(out, lines.join('\n'));
+console.log('wrote', out);

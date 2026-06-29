@@ -106,6 +106,7 @@
 (def add       (fn (:a :b :sat)))
 (def sub       (fn (:a :b :sat)))
 (def mul       (fn (:a :gain)))
+; div floors and mod takes the divisor's sign, so (div a n)*n + (mod a n) = a.
 (def div       (fn (:a :n)))
 (def mod       (fn (:a :n)))
 (def transpose (fn (:in :by)))
@@ -136,12 +137,29 @@
 (def pulse-in (fn ()))
 (def audio-in (fn ()))
 
+; ---- MIDI input ----------------------------------------------------------
+; From a USB keyboard plugged into the card (host) or a computer (device).
+; Same (name :label) form; :ch picks a channel 1..16 (omitted = omni). midi-note
+; and midi-velocity hold the last note-on; (midi-cc :N) reads CC number N;
+; midi-trig fires on note-on of :note; midi-clock/midi-playing follow transport.
+(def midi-note     (fn (:ch)))
+(def midi-gate     (fn (:ch :note)))
+(def midi-velocity (fn (:ch)))
+(def midi-bend     (fn (:ch)))
+(def midi-pressure (fn (:ch)))
+(def midi-trig     (fn (:note)))
+(def midi-cc       (fn ()))
+(def midi-clock    (fn ()))
+(def midi-playing  (fn ()))
+
 ; ---- oscillators ---------------------------------------------------------
 (def phasor   (fn (:pitch :hz :rate :tempo :cents :sync :fm :depth :width => :phase)))
-(def sine     (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :cents :phase)))
+(def sine     (fn (:pitch :note :midi :fm :pm :depth :fb :sync :hz :rate :cents :phase)))
 (def triangle (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :cents :phase)))
 (def saw      (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :cents :phase)))
-(def square   (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :width :cents :phase)))
+(def square    (fn (:pitch :note :midi :fm :pm :depth :sync :hz :rate :width :cents :phase)))
+(def wavetable (fn (:table :pitch :pos :pm :hz :rate :cents => :out)))
+(def wt        (fn (:table :pitch :pos :pm :hz :rate :cents => :out)))
 (def follow   (fn (:base :mult :div :rate :drift)))
 
 ; ---- audio shaping -------------------------------------------------------
@@ -151,7 +169,13 @@
 (def lpg      (fn (:in :ctrl)))
 (def envfollow (fn (:in :cut)))
 (def vcf      (fn (:in :cut :res => :lp :hp :bp :notch)))
+(def lpf2     (fn (:in :cut :res)))
+(def hpf2     (fn (:in :cut :res)))
+(def bpf2     (fn (:in :cut :res)))
 (def envelope (fn (:trig :gate :decay :peak)))
+(def adsr (fn (:gate :attack :decay :sustain :release :peak)))
+(def dxeg (fn (:gate :r1 :r2 :r3 :r4 :l1 :l2 :l3 :l4)))
+(def dx   (fn (:bank :preset :pitch :gate :decay :tone => :out)))
 (def slew     (fn (:in :rate)))
 (def vca      (fn (:in :amp)))
 (def ring     (fn (:in :amp)))
@@ -163,6 +187,10 @@
 ; cubic soft-clip. :drive pre-gains into the curve, :bias (bipolar) skews it for
 ; even-harmonic warmth, :mix blends dry/wet, :level is output makeup gain.
 (def saturate (fn (:in :drive :bias :mix :level)))
+; LUT waveshaper. :drive pre-gains into a baked transfer curve; :curve picks it
+; (0 soft, 1 hard, 2 asym/even-harmonic, 3 overdrive); :oversample 1 turns on 4x
+; anti-aliasing (off by default). Complements saturate/wavefold/crush.
+(def shape    (fn (:in :drive :curve :oversample)))
 
 ; ---- generators ----------------------------------------------------------
 (def noise   (fn (:hz :rate)))
@@ -171,7 +199,9 @@
 (def walk    (fn (:step :trig)))
 
 ; ---- edge detectors / clock state ----------------------------------------
+; hold -- a sample & hold (expander form, see the stateful-memory note below).
 (def hold    (fn (:val :on)))
+(def pickup  (fn (:value :on :init :near)))
 (def toggle  (fn (:in)))
 (def schmitt (fn (:in :lo :hi)))
 (def gate    (fn (:in :thresh :len)))
@@ -183,6 +213,11 @@
 ; the master clock every CLK_OP defaults to. Defined after clock/phasor.
 (def master (clock :bpm 120))
 (def z1      (fn (:x)))
+
+; varispeed: a 0..VMAX knob mapped to a play speed, sweeping from a slow LFO up to
+; audio rate. Feed it to play/loop as the speed for a one-knob LFO-to-wavetable read.
+; (2801 is the safe top of the phasor :rate input; spread maps the knob into [0, 2801).)
+(def varispeed (fn (:knob) (spread knob 2801)))
 (def feedback (fn ()))
 (def diff    (fn (:in)))
 ; trig: a clock's BEAT = the phase wrap (the ramp's reset). Lands on the downbeat for
@@ -216,6 +251,14 @@
 (def tap     (fn (:tape :amount :span :interp)))
 (def record  (fn ()))
 
+; play / loop: read a tape under a play head moving at `speed`, hiding the phasor.
+; A play head is a phasor swept across the tape; `speed` sets how fast (and, signed,
+; which way). play sweeps the whole tape; loop sweeps only the first `span` cells
+; (e.g. the part of a slot actually recorded). Several plays on one tape at different
+; speeds give several heads at once.
+(def play (fn (:tape :speed) (lookup tape (spread (phasor :rate speed) (len tape)))))
+(def loop (fn (:tape :speed :span) (lookup tape (spread (phasor :rate speed) span))))
+
 ; ---- compiler special forms ----------------------------------------------
 ; Handled by the expander/lowerer (no kernel of their own); listed here so the
 ; surface is discoverable from this file.
@@ -226,10 +269,29 @@
 (def normal    (fn (:jack :default)))             ; the jack when patched, else default
 (def connected (fn (:jack)))                      ; VMAX if a cable is patched into the jack, else 0
 
+; ---- hold (state / sample & hold) + timing regions ----------------------
+; hold is a sample & hold. Three shapes, told apart by whether it carries a clock:
+;   (hold VAL ON) | (hold VAL :on G)        level S&H: track VAL while the gate is high
+;   (hold NAME NEXT :trig C | :per-sample [:init V])
+;       a register/fold -- NAME is the held value, NEXT is stored each clock edge (or
+;       sample) and may reference NAME for feedback (counters, accumulators, one-poles).
+;   (hold VAL :trig C | :per-sample [:init V])   edge/per-sample S&H of an outside VAL.
+;     (def i   (hold n (mod (add n 1) 16) :trig clk))   ; counts 0..15, one per tick
+;     (def sum (hold s (add s x) :trig clk))            ; running total
+; State lives in `hold`; `def` stays a timeless binding.
+; (on CLK :when G FORM...)
+;   A timing region: every (<- ...) write inside defaults to :trig CLK and :when G,
+;   so the clock and gate are stated once, not repeated on every line.
+
 ; ---- selectors / converters ---------------------------------------------
 ; (switch :z) reads the panel z-switch as rails (VMIN/VMID/VMAX). Panel INPUT only.
 ; To select a value, use (thru (lens a b ...) idx) for index or (if cond a b) for boolean.
 (def switch   (fn (:z)))
+
+; switch (and any 3-rail control) position as a boolean: down < middle < up.
+(def up   (fn (:x) (gt x VMID)))
+(def mid  (fn (:x) (eq x VMID)))
+(def down (fn (:x) (lt x VMID)))
 (def v-oct    (fn (:note)))
 (def cv       (fn (:in :bipolar)))
 (def snap     (fn (:note :scale)))
@@ -251,6 +313,11 @@
 (def window (fn (:a :lo :hi)))
 (def abs    (fn (:x)))
 (def rect   (fn (:x)))
+; exp2: exponential CV/VCA transfer over ~8 octaves. :in 0..VMAX maps to
+; VMAX*2^(8*(in/VMAX-1)): in=VMAX -> VMAX (unity), in=0 -> ~16 (near silence).
+(def exp2   (fn (:in)))
+; log2: inverse of exp2, recovers the linear control from the exponential gain.
+(def log2   (fn (:in)))
 
 ; ---- onset/gate/hit readers over a tape ---------------------------------
 (def onsets (fn (:tape :trig)))
@@ -261,6 +328,10 @@
 (def kick  (fn (:note :midi :decay :drive :sweep :trig)))
 (def snare (fn (:note :midi :decay :snappy :tone :trig)))
 (def hat   (fn (:note :midi :decay :tone :trig)))
+
+; Karplus-Strong plucked string: :trig re-excites, :pitch (MIDI) sets the
+; loop length, :damp (0..vmax) sets decay/brightness (more = faster, duller).
+(def pluck (fn (:trig :pitch :damp)))
 
 ; ===========================================================================
 ; PATTERN BUILDERS -- write rhythms and melodies as quoted lists.
@@ -273,6 +344,23 @@
 (def notes (fn (:pat) (tape pat)))
 ; score is an expander form: a quoted list becomes a pitch tape and a
 ; rhythm tape. _ and ~ are rests; distinct ties are not yet implemented.
+
+; midi-score: the played-in counterpart to score. Records the MIDI keyboard's
+; note + gate + velocity onto a clock grid while :rec is held (the loop is as long
+; as you held it), then loops the take at :speed. Returns the same :notes / :rhythm
+; ports score does, plus :vel -- so a performance is consumed like a written part.
+(def midi-score (fn (:rec :clk :speed => :notes :rhythm :vel)
+  (def np (tape :len 1600)) (def gp (tape :len 1600)) (def vp (tape :len 1600))
+  (def cap (sub (len np) 1))
+  (def pos (hold p (if rec (min (add p 1) cap) 0) :trig clk))
+  (def lng (hold l (if rec (add pos 1) l) :trig clk :init 1))
+  (on clk :when rec
+    (<- (np pos) (midi-note))
+    (<- (gp pos) (midi-gate))
+    (<- (vp pos) (midi-velocity)))
+  (<- notes  (if rec (midi-note)     (loop np speed lng)))
+  (<- rhythm (if rec (midi-gate)     (loop gp speed lng)))
+  (<- vel    (if rec (midi-velocity) (loop vp speed lng)))))
 
 ; ===========================================================================
 ; RHYTHMS -- classic patterns to start from and mutate.

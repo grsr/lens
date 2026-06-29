@@ -1,5 +1,6 @@
 #include "runtime.h"
 #include "kernel_ids.h"
+#include "midi.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -36,6 +37,17 @@ struct Buffer lens_buffer_pool[LENS_MAX_BUFFERS];
 struct RuntimeTerminal lens_terminal_pool[LENS_MAX_TERMINALS];
 int32_t  lens_const_pool[LENS_CONST_POOL_WORDS];
 int32_t  lens_shadow_pool[LENS_MAX_SLOTS];
+
+/* Intern a constant: reuse an existing pool word with the same value, else add one.
+   So N uses of the same literal cost one word, not N. Returns the pool index, or
+   -1 if the (distinct-value) pool is full. */
+static int lens_intern_const(struct LensRuntime* rt, int32_t v) {
+    for (uint16_t k = 0; k < rt->const_count; k++)
+        if (rt->const_pool[k] == v) return (int)k;
+    if (rt->const_count >= LENS_CONST_POOL_WORDS) return -1;
+    rt->const_pool[rt->const_count] = v;
+    return (int)rt->const_count++;
+}
 
 /* Flat per-core walk-order lists: SR then CR slots for each core. */
 struct Slot* lens_core0_flat_ptrs[LENS_MAX_SLOTS];
@@ -74,6 +86,13 @@ static uint16_t slot_bump;
 static uint8_t  buffer_bump;
 static uint8_t  terminal_bump;
 static uint16_t const_bump;
+
+/* Live used bytes of each pool, for the settings-save overlay. The pool layout is a
+   deterministic function of the snapshot, so the same snapshot re-bumps to the same
+   sizes and per-slot offsets; saving these bytes and copying them back after an apply
+   restores live state without interpreting any per-kernel struct. */
+size_t lens_nodestate_used(void) { return nodestate_bump; }
+size_t lens_control_used(void)   { return control_bump; }
 
 static void* alloc_audio(size_t n) {
     if (audio_bump + n > LENS_AUDIO_BUFFER_BYTES) return NULL;
@@ -121,7 +140,7 @@ static int32_t  i32(Cur* c) { return (int32_t)u32(c); }
 
 /* ---- snapshot_apply ---- */
 int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len) {
-    if (!bytes || len < 20) return -1;
+    if (!bytes || len < 23) return -1;   /* 19-byte header + 4-byte CRC */
 
     /* CRC: last 4 bytes; covers everything before. */
     uint32_t stored = (uint32_t)(bytes[len-4]|(bytes[len-3]<<8)|(bytes[len-2]<<16)|((uint32_t)bytes[len-1]<<24));
@@ -129,8 +148,8 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
 
     Cur c = { bytes, bytes + len - 4 };
 
-    /* HEADER (16 bytes). */
-    if (!ok(&c, 16)) return -1;
+    /* HEADER (19 bytes). */
+    if (!ok(&c, 19)) return -1;
     if (c.p[0]!='L'||c.p[1]!='E'||c.p[2]!='N'||c.p[3]!='S'||c.p[4]!='2') return -3;
     c.p += 5;
     u16(&c);                           /* version */
@@ -238,13 +257,14 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         for (uint16_t wi = 0; wi < sc; wi++) {
             PASS1_SLOT(&s1, pool, nconst, wi);
         }
-        if (nconst > LENS_CONST_POOL_WORDS) return -6;
+        (void)nconst;  /* a use-count upper bound; the pool dedupes, so the real
+                          limit is distinct values, checked as we intern in pass 2. */
         rt->state_pool_size = pool;
         rt->state_pool = alloc_nodestate(pool ? pool : 1);
         if (!rt->state_pool) return -6;
         memset(rt->state_pool, 0, pool ? pool : 1);
         rt->const_pool = lens_const_pool;
-        memset(lens_const_pool, 0, nconst * sizeof(int32_t));
+        memset(lens_const_pool, 0, sizeof(lens_const_pool));
         rt->const_count = 0;
     }
 
@@ -296,16 +316,12 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
                     bfixes[nbfix++] = (BufFix){ (wi_), j_, bid_ }; \
             } else if (tag_ == LENS_TAG_CONST_U8) { \
                 if (!ok(&c, 1)) return -1; \
-                int32_t v_ = u8(&c); \
-                uint16_t ci_ = rt->const_count++; \
-                rt->const_pool[ci_] = v_; \
-                *inp_[j_] = (void*)&rt->const_pool[ci_]; \
+                int ci_ = lens_intern_const(rt, u8(&c)); \
+                *inp_[j_] = (ci_ >= 0) ? (void*)&rt->const_pool[ci_] : (void*)&g_zero; \
             } else if (tag_ == LENS_TAG_CONST_I32) { \
                 if (!ok(&c, 4)) return -1; \
-                int32_t v_ = i32(&c); \
-                uint16_t ci_ = rt->const_count++; \
-                rt->const_pool[ci_] = v_; \
-                *inp_[j_] = (void*)&rt->const_pool[ci_]; \
+                int ci_ = lens_intern_const(rt, i32(&c)); \
+                *inp_[j_] = (ci_ >= 0) ? (void*)&rt->const_pool[ci_] : (void*)&g_zero; \
             } else { return -5; } \
         } \
         if (!ok(&c, 6)) return -1; \
@@ -313,12 +329,11 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         s_->param0 = u32(&c); \
         if (runtime_is_hw_leaf(s_->kernel_id)) \
             s_->in0 = (void*)runtime_hw_jack_ptr(s_->param0); \
+        if (runtime_is_midi_leaf(s_->kernel_id)) \
+            s_->in0 = (void*)runtime_midi_jack_ptr(s_->param0); \
         if (s_->kernel_id == KID_OP_SCHMITT) { \
             if (nc_ >= 2) s_->param0 |= 1u; \
             if (nc_ >= 3) s_->param0 |= 2u; \
-        } \
-        if (s_->kernel_id == KID_OP_MORPH) { \
-            s_->param0 = nc_;  /* total in-count needed by kernel */ \
         } \
         runtime_slot_wire_fn(s_); \
     } while (0)
@@ -334,13 +349,13 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         uint8_t hasRh = 0;
         for (uint16_t i = 0; i < sc; i++) {
             uint8_t k = rt->slots[i].kernel_id;
-            if (k >= KID_OP_RECORDHEAD_PER_SAMPLE && k <= KID_OP_RECORDHEAD_LEN_CAPPED_GATED) hasRh = 1;
+            if ((k >= KID_OP_RECORDHEAD_PER_SAMPLE && k <= KID_OP_RECORDHEAD_LEN_CAPPED_GATED)
+                || k == KID_OP_RECORDHEAD_SEEK) hasRh = 1;
             if (slot_core[i] == 0) lens_core0_flat_ptrs[n0++] = &rt->slots[i];
             else                   lens_core1_flat_ptrs[n1++] = &rt->slots[i];
         }
         rt->core0_slots = lens_core0_flat_ptrs; rt->core0_count = n0;
         rt->core1_slots = lens_core1_flat_ptrs; rt->core1_count = n1;
-        rt->dual_active = (n1 > 0) ? 1u : 0u;
         rt->has_recordhead = hasRh;
     }
 
@@ -394,6 +409,7 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
                     if (rt->xcore_count >= LENS_MAX_SLOTS) return -7;
                     uint16_t idx = rt->xcore_count++;
                     rt->xcore_src[idx] = in;
+                    rt->xcore_core[idx] = slot_core[pi];   /* producer core */
                     lens_shadow_pool[idx] = *in;
                     *inp[j] = (void*)&lens_shadow_pool[idx];
                     continue;
@@ -404,6 +420,7 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
                     if (rt->xcore_count >= LENS_MAX_SLOTS) return -7;
                     uint16_t idx = rt->xcore_count++;
                     rt->xcore_src[idx] = (int32_t*)(base + soff[pi]);
+                    rt->xcore_core[idx] = slot_core[pi];   /* producer core */
                     lens_shadow_pool[idx] = *rt->xcore_src[idx];
                     shadow_idx[pi] = (int16_t)idx;
                 }

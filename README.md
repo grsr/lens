@@ -4,7 +4,7 @@
 
 # Lens
 
-> **0.1 alpha.** Lens is early and shared so people can start playing with it,
+> **0.2 alpha.** Lens is early and shared so people can start playing with it,
 > not as a finished release. Expect rough edges, patches that misbehave, and
 > outright bugs. Loupe is a little language that lets you combine things in lots
 > of ways, so testing every combination is more than I can do alone. Releasing
@@ -76,6 +76,12 @@ the folder for the rest. The `patches/utility-pair/` subfolder holds small `fn`
 library files (low-pass gate, wavefolder, sample-and-hold, slew, and more), a
 homage to Chris Johnson's Utility-Pair card and a demo of the `(use)` style.
 
+You can also play the card live over MIDI: plug a USB MIDI keyboard straight into
+the card's USB-C port, or send notes from a computer. It reads notes, velocity, CC
+and clock, and can send them too, so it works as a voice, a CV/gate converter, or a
+sequencer driving an external synth. The `midi-*.loupe` patches cover both
+directions.
+
 Lens leans into the generative and feedback-driven side of modular, but it
 doesn't have to be used that way. It can just be a kick drum, an oscillator, a
 filter, or any other single voice in your rack.
@@ -96,8 +102,10 @@ CMakeLists.txt, pico_sdk_import.cmake, LICENSE, package.json
 
 ## Build from source
 
-The repo ships a ready-built `lens.uf2`. To build it yourself you need the
-Raspberry Pi [pico-sdk](https://github.com/raspberrypi/pico-sdk):
+The repo ships a ready-built `lens.uf2`, and releases attach that committed
+binary rather than recompiling. To build it yourself you need the Raspberry Pi
+[pico-sdk](https://github.com/raspberrypi/pico-sdk); it is built and tested with
+**pico-sdk 2.1.1** and **arm-gcc 14.2**:
 
 ```sh
 cmake -B build
@@ -107,6 +115,44 @@ cmake --build build -j
 A fresh `lens.uf2` lands at the repo root. Flash it the same way you flash any
 program card: with the module connected over USB, the card mounts as a USB
 drive called `RPI-RP2`; copy `lens.uf2` onto it.
+
+## Loading DX7 voice banks
+
+The `dx` op plays Yamaha DX7 FM voices, read from banks baked into the firmware.
+Lens ships no banks of its own: the DX7 voice data is copyrighted, so you supply
+your own `.syx` files and rebuild.
+
+1. Get one or more 32-voice DX7 `.syx` bank files (the standard 4104-byte bulk
+   dump, or a headerless 4096-byte body). Many circulate online under varying
+   licences, so check before you redistribute anything you build.
+
+2. Point `tools/gen-dx7banks.js` at them by editing its `BANKS` list:
+
+   ```js
+   const BANKS = [
+     { name: 'mybank',  path: 'banks/Bank.syx' },
+     { name: 'another', path: 'banks/Other.syx' },
+   ];
+   ```
+
+3. Generate the (gitignored) header and rebuild, then flash the fresh `lens.uf2`
+   as above:
+
+   ```sh
+   node tools/gen-dx7banks.js
+   cmake --build build -j
+   ```
+
+4. Select voices in a patch by bank and preset:
+
+   ```
+   (dx :bank 0 :preset 10 :gate g :pitch 60)   ; voice 10 of the first bank
+   ```
+
+   `:bank` is the position in the `BANKS` list (0, 1, 2, ...) and `:preset` is the
+   voice 0..31 within it. `:pitch` sets the note, `:gate` triggers it, and `:decay`
+   and `:tone` shape the envelope length and FM brightness. The sysex header and
+   checksum are stripped for you, so any 32-voice `.syx` works.
 
 ## Dig in
 

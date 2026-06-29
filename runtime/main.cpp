@@ -3,16 +3,17 @@
  *
  * ComputerCard by Chris Johnson (see ComputerCard.h).
  *
- * Core 0: audio interrupt via ComputerCard::ProcessSample() -> runtime_step_core0().
+ * Core 0: audio interrupt via ComputerCard::ProcessSample() -> runtime_walk_core0().
  * Core 1: TinyUSB device stack + sysex receive parser + runtime_walk_core1().
  *
- * Dual-core model:
- *   Core 0 increments rt_->sample_counter at the end of each audio interrupt.
- *   Core 1 spin-polls sample_counter (with tud_task() between checks for USB).
- *   Each core walks only its assigned slots and commits only its own slots.
- *   Cross-core reads see the previous sample's committed value (free feedback).
- *   Core 1 sets core1_done = seq after its walk; Core 0 spins on it (bounded)
- *   before sweeping tapes and driving terminals.
+ * Dual-core model (non-blocking):
+ *   Core 0 (audio ISR) rings Core 1 via the SIO FIFO doorbell each sample, walks
+ *   its own slots, sweeps its own recordheads, publishes its own shadows, drives
+ *   the output jacks, and increments sample_counter. It never waits on Core 1.
+ *   Core 1's doorbell IRQ walks its slots, sweeps and publishes its own, and sets
+ *   core1_done. A late Core 1 just holds last sample's shadow (one extra sample of
+ *   cross-core lag, never a stall). Cross-core reads see the previous sample's
+ *   shadow, so a forward reference is free one-sample feedback.
  */
 
 #include "ComputerCard.h"
@@ -28,6 +29,8 @@
 #include "bsp/board_api.h"  /* board_init */
 #include "tusb.h"
 #include "sysex.h"
+#include "midi.h"
+#include "usb_midi_host.h"
 
 #include "hardware/structs/mpu.h"
 
@@ -39,20 +42,30 @@ extern "C" {
 /* ---- Flash save-slot layout ----
  *
  * Pico has 2 MB flash (PICO_FLASH_SIZE_BYTES = 2097152).
- * Reserve the last two 4 KB sectors (8 KB) for the saved snapshot.
+ * Reserve the last two 4 KB sectors (8 KB) for the saved snapshot + live state.
  * Offset is XIP_BASE-relative for reading; flash_range_* use byte offsets
  * from flash origin (no XIP_BASE added).
  *
- * Layout inside the 8 KB slot:
+ * Layout inside the slot:
  *   [0..3]    magic "LENS"  (4 bytes)
  *   [4..7]    build hash u32 LE (rejects a snapshot saved by a different build)
  *   [8..9]    snapshot length u16 LE
- *   [10..N]   snapshot bytes
+ *   [10..11]  node-state pool length u16 LE  (live state, 0 = none)
+ *   [12..13]  control pool length u16 LE      (live tape/register state, 0 = none)
+ *   [14..]    snapshot bytes, then node-state pool bytes, then control pool bytes
  *   [N..N+3]  CRC32 over bytes [0..N)
+ *
+ * The pools are saved as raw bytes. Restore copies them back over the live pools
+ * after snapshot_apply: the same snapshot re-bumps to the same per-slot offsets, so
+ * the bytes line up with no per-kernel interpretation. The build-hash guard ensures
+ * struct layouts match. Audio-pool buffers (delay lines, recorded audio) are NOT
+ * saved: only node state and the small control pool (registers, short tapes). If the
+ * snapshot plus pools would overflow the slot, the save falls back to patch-only
+ * (nd_len = ct_len = 0). The 8 KB staging buffer (g_pending) caps a write at 8 KB.
  */
 #define LENS_SAVE_MAGIC    "LENS"
 #define LENS_SAVE_MAGIC_LEN 4
-#define LENS_SAVE_HDR_LEN  (LENS_SAVE_MAGIC_LEN + 4u + 2u) /* magic + build_hash + len */
+#define LENS_SAVE_HDR_LEN  (LENS_SAVE_MAGIC_LEN + 4u + 2u + 2u + 2u) /* magic+hash+snap_len+nd_len+ct_len */
 #define LENS_SAVE_SLOT_SIZE (8u * 1024u)               /* two sectors */
 #define LENS_SAVE_SLOT_OFF  (PICO_FLASH_SIZE_BYTES - LENS_SAVE_SLOT_SIZE)
 #define LENS_SAVE_SLOT_XIP  (XIP_BASE + LENS_SAVE_SLOT_OFF)
@@ -90,17 +103,13 @@ static inline void dwt_enable(void) {
 static inline uint32_t dwt_read(void) { return M0P_SYSTICK_CVR; }
 
 /* ---- Perf ring (last 1024 samples) ---- */
-/* Gated by LENS_PERF_PROBE build flag; compiled in by default. */
-#ifndef LENS_PERF_PROBE
-#define LENS_PERF_PROBE 1
-#endif
-
+/* LENS_PERF_PROBE default is in runtime.h; CMake forwards the build flag. */
 #if LENS_PERF_PROBE
 /* Three cycle sections per sample: walk (Core 0 slot walk), io (hw read + drive),
    total (full ProcessSample). All in raw DWT cycles. */
 struct PerfRingEntry {
     uint16_t total;  /* full ProcessSample cycles (saturates at 65535) */
-    uint16_t walk;   /* runtime_step_core0 cycles */
+    uint16_t walk;   /* Core 0 walk cycles */
     uint16_t io;     /* hw_in gather + driveJacks cycles */
 };
 static struct PerfRingEntry __attribute__((section(".data"))) perf_ring[1024];
@@ -183,6 +192,10 @@ extern "C" void lens_request_factory_reset(void) {
     g_factory_reset_requested = true;
 }
 
+/* USB role: 1 = host, 0 = device. Set on Core 0 before Core 1 launches; Core 1
+ * reads it once at startup to select the USB init path. */
+volatile uint8_t g_usb_host_mode = 0;
+
 /*
  * Perform flash save: erase slot, write magic+len+snapshot+crc32, reboot.
  * Must be called with Core 1 reset and interrupts disabled.
@@ -190,11 +203,23 @@ extern "C" void lens_request_factory_reset(void) {
 static void do_flash_save(void) {
     if (g_last_snapshot_len == 0) return; /* nothing to save */
 
-    const size_t HDR_LEN     = LENS_SAVE_HDR_LEN; /* magic + build_hash + len */
-    const size_t payload_len = HDR_LEN + g_last_snapshot_len;
-    const size_t total_len   = payload_len + 4; /* +4 for CRC32 */
+    const size_t HDR_LEN  = LENS_SAVE_HDR_LEN;
+    const size_t snap_len = g_last_snapshot_len;
+    /* Live state to overlay on restore: the node-state pool (op state, incl. pickup
+       takeover values) and the small control pool (registers / short tapes). */
+    size_t nd_len = lens_nodestate_used();
+    size_t ct_len = lens_control_used();
+    if (nd_len > LENS_NODESTATE_BYTES)      nd_len = LENS_NODESTATE_BYTES;
+    if (ct_len > LENS_CONTROL_BUFFER_BYTES) ct_len = LENS_CONTROL_BUFFER_BYTES;
 
-    /* Must fit in the save slot (8 KB). */
+    /* If snapshot + live state overflow the slot or the 8 KB staging buffer, fall back
+       to a patch-only save (still useful: the graph survives, settings reset). */
+    if (HDR_LEN + snap_len + nd_len + ct_len + 4u > LENS_SAVE_SLOT_SIZE) {
+        nd_len = 0;
+        ct_len = 0;
+    }
+    const size_t payload_len = HDR_LEN + snap_len + nd_len + ct_len;
+    const size_t total_len   = payload_len + 4; /* +4 for CRC32 */
     if (total_len > LENS_SAVE_SLOT_SIZE) return;
 
     /* Align total write size to FLASH_PAGE_SIZE (256 bytes). */
@@ -217,11 +242,18 @@ static void do_flash_save(void) {
     buf[5] = (uint8_t)((g_build_hash >> 8) & 0xFFu);
     buf[6] = (uint8_t)((g_build_hash >> 16) & 0xFFu);
     buf[7] = (uint8_t)((g_build_hash >> 24) & 0xFFu);
-    /* Write length u16 LE. */
-    buf[8] = (uint8_t)(g_last_snapshot_len & 0xFFu);
-    buf[9] = (uint8_t)((g_last_snapshot_len >> 8) & 0xFFu);
-    /* Write snapshot bytes. */
-    memcpy(buf + HDR_LEN, g_last_snapshot, g_last_snapshot_len);
+    /* Write snapshot / pool lengths, u16 LE. */
+    buf[8]  = (uint8_t)(snap_len & 0xFFu);
+    buf[9]  = (uint8_t)((snap_len >> 8) & 0xFFu);
+    buf[10] = (uint8_t)(nd_len & 0xFFu);
+    buf[11] = (uint8_t)((nd_len >> 8) & 0xFFu);
+    buf[12] = (uint8_t)(ct_len & 0xFFu);
+    buf[13] = (uint8_t)((ct_len >> 8) & 0xFFu);
+    /* Write snapshot bytes, then the live pools. */
+    uint8_t* w = buf + HDR_LEN;
+    memcpy(w, g_last_snapshot,    snap_len); w += snap_len;
+    memcpy(w, lens_nodestate_pool, nd_len);  w += nd_len;
+    memcpy(w, lens_control_pool,   ct_len);  w += ct_len;
 
     uint32_t final_crc = save_crc32(buf, payload_len);
     buf[payload_len + 0] = (uint8_t)(final_crc & 0xFFu);
@@ -247,6 +279,9 @@ class LensCard : public ComputerCard {
 public:
     LensCard() {}
 
+    /* Exposes the protected ComputerCard CC-pin probe for role detection. */
+    USBPowerState_t ReadUSBPowerState() { return USBPowerState(); }
+
     bool init() {
         struct LensRuntime* rt = nullptr;
 
@@ -256,12 +291,15 @@ public:
         if (slot[0]=='L' && slot[1]=='E' && slot[2]=='N' && slot[3]=='S') {
             uint32_t stored_hash = (uint32_t)slot[4] | ((uint32_t)slot[5] << 8)
                                  | ((uint32_t)slot[6] << 16) | ((uint32_t)slot[7] << 24);
-            uint16_t slen = (uint16_t)(slot[8] | ((uint16_t)slot[9] << 8));
+            uint16_t slen   = (uint16_t)(slot[8]  | ((uint16_t)slot[9]  << 8));
+            uint16_t nd_len = (uint16_t)(slot[10] | ((uint16_t)slot[11] << 8));
+            uint16_t ct_len = (uint16_t)(slot[12] | ((uint16_t)slot[13] << 8));
             const size_t HDR_LEN = LENS_SAVE_HDR_LEN;
             /* Reject a snapshot saved by a different build (struct layout may have
              * changed): fall through to the baked factory instead of applying stale. */
-            if (stored_hash == g_build_hash && slen > 0 && slen <= LENS_SNAPSHOT_CACHE) {
-                const size_t payload_len = HDR_LEN + slen;
+            if (stored_hash == g_build_hash && slen > 0 && slen <= LENS_SNAPSHOT_CACHE
+                && nd_len <= LENS_NODESTATE_BYTES && ct_len <= LENS_CONTROL_BUFFER_BYTES) {
+                const size_t payload_len = HDR_LEN + slen + nd_len + ct_len;
                 uint32_t stored_crc =
                     (uint32_t)slot[payload_len + 0]        |
                     ((uint32_t)slot[payload_len + 1] << 8)  |
@@ -273,6 +311,12 @@ public:
                     g_apply_attempts++;
                     g_last_apply_rc = rc;
                     if (rc == 0) {
+                        /* Overlay saved live state onto the freshly-applied (zeroed)
+                           pools: same snapshot -> same offsets, so raw bytes line up.
+                           Runs before the first ProcessSample, so ops see the restored
+                           state (e.g. pickup keeps its taken-over value, not init). */
+                        if (nd_len) memcpy(lens_nodestate_pool, slot + HDR_LEN + slen, nd_len);
+                        if (ct_len) memcpy(lens_control_pool,   slot + HDR_LEN + slen + nd_len, ct_len);
                         memcpy(g_last_snapshot, slot + HDR_LEN, slen);
                         g_last_snapshot_len = slen;
                         g_snapshot_crc = snapshot_trailer_crc(slot + HDR_LEN, slen);
@@ -315,6 +359,7 @@ protected:
         /* Apply runs on Core 0 here, immediately, no quiet gate. One glitched
          * sample on patch swap is acceptable. */
         if (g_pending.ready) {
+            __dmb();   /* pair with the Core 1 writer: read len after seeing ready */
             struct LensRuntime* new_rt = nullptr;
             size_t plen = g_pending.len;
             int rc = snapshot_apply(&new_rt, g_pending.bytes, plen);
@@ -385,37 +430,29 @@ protected:
 
         struct HardwareOutputs hw_out = {};
 
-        /* 2. Run the audio slice. Single core: kernels write their single
-         * output directly during the walk; recordhead_sweep applies any
-         * deferred tape writes at end-of-tick. */
+        /* 2. Run the audio slice. Kernels write their output during the walk;
+         * recordhead_sweep applies any deferred tape writes at end-of-tick. */
 #if LENS_PERF_PROBE
         uint32_t t_walk_start = dwt_read();
 #endif
-        if (rt->dual_active) {
-            /* Dual-core: ring Core 1's doorbell, walk Core 0 in parallel, wait for
-             * Core 1 (bounded so a late slice drops cleanly, never deadlocks), then
-             * commit tapes, publish cross-core shadows, drive outputs. Same order the
-             * host_runner sim proved race-free. Cross-core reads are unit-delayed via
-             * the shadows, so the two cores' walk order does not affect the result. */
-            const uint32_t kCore1SpinLimit = 20000u;
+        /* Non-blocking dual-core: Core 0 NEVER waits for Core 1. It rings Core 1
+         * each sample (Core 1 free-runs and processes the latest seq when it can),
+         * then walks its own slots, commits its own recordheads, publishes its own
+         * shadows, and drives outputs. If Core 1 is late (e.g. a USB burst), its
+         * shadows simply hold last frame's value -- one more sample of lag on the
+         * cross-core CV, never a stall. Each core only ever touches its own state,
+         * and terminal feeders are pinned to Core 0, so the outputs are clean. A
+         * patch with no Core 1 slots runs the same path; Core 1 just walks nothing. */
+        {
             uint32_t seq = rt->sample_counter;
             runtime_update_hw_scratch(&hw_in);  /* both cores read scratch */
-            __dmb();                            /* scratch visible before doorbell */
+            __dmb();                            /* scratch + Core 0 shadows visible before ring */
             sio_hw->fifo_wr = seq;              /* triggers SIO_IRQ_PROC1 on Core 1 */
             runtime_walk_core0(rt, seq);
-            uint32_t spins = 0;
-            while (rt->core1_done != seq && ++spins < kCore1SpinLimit) tight_loop_contents();
-            recordhead_sweep(rt);
-            runtime_publish_shadows(rt);
+            recordhead_sweep_core0(rt);
+            runtime_publish_shadows_core0(rt);
             runtime_drive_terminals(rt, &hw_out);
             rt->sample_counter = seq + 1;
-        } else {
-            /* Single-core: the compiler put every slot on Core 0, so there is no
-             * cross-core read to order. Skip the FIFO ring, the bounded spin, and
-             * the shadow publish (xcore_count is 0 anyway). runtime_step_core0
-             * walks Core 0's SR + CR + recordhead commits, then drives terminals
-             * and bumps sample_counter. Zero doorbell tax. */
-            runtime_step_core0(rt, &hw_in, &hw_out);
         }
 #if LENS_PERF_PROBE
         uint32_t t_walk_done = dwt_read();
@@ -542,6 +579,10 @@ protected:
  * patch transfer corrupts), while a late audio slice just trips Core 0's
  * spin budget and the sample drops cleanly via the one-sample-lag semantics.
  */
+/* Diagnostic: how many times Core 1 has actually run its walk. Reported in PERF so
+   we can tell a real dual-core run (>0) from a silent Core 1 (==0). */
+static volatile uint32_t g_core1_loops = 0;
+
 static void __not_in_flash_func(core1_doorbell_irq)(void) {
     uint32_t seq = 0;
     bool got = false;
@@ -550,22 +591,40 @@ static void __not_in_flash_func(core1_doorbell_irq)(void) {
     if (!got) return;
     struct LensRuntime* rt = g_rt;
     if (rt) {
+        /* Self-contained frame: walk Core 1's slots, commit ITS recordheads, and
+         * publish ITS shadows. Core 0 only ever reads these shadows, never Core 1's
+         * live state, so there is nothing for Core 0 to wait on. */
         runtime_walk_core1(rt, seq);
+        recordhead_sweep_core1(rt);
+        runtime_publish_shadows_core1(rt);
+        g_core1_loops++;
+        rt->core1_done = seq;
     }
-    /* Always publish done = seq so Core 0's spin exits even if rt was null
-     * mid-apply; that sample's audio simply skips Core 1's contribution. */
-    if (rt) rt->core1_done = seq;
 }
 
-static void __not_in_flash_func(core1_entry)(void) {
-    /* SPEC: board_init() is NOT called here; Core 0 called it. */
-    tud_init(0); /* RP2040 always port 0 */
+/* The host MIDI driver calls this (weak) when a mounted device has RX packets.
+ * Drain the decoded byte stream straight into the transport-independent parser. */
+extern "C" void tuh_midi_rx_cb(uint8_t dev_addr, uint32_t num_packets) {
+    (void)num_packets;
+    uint8_t cable;
+    uint8_t buf[64];
+    uint32_t n;
+    while ((n = tuh_midi_stream_read(dev_addr, &cable, buf, sizeof(buf))) > 0)
+        for (uint32_t i = 0; i < n; i++) midi_feed_byte(buf[i]);
+}
 
-    multicore_fifo_clear_irq();
-    irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_doorbell_irq);
-    irq_set_priority(SIO_IRQ_PROC1, 0xC0);
-    irq_set_enabled(SIO_IRQ_PROC1, true);
+/* ---- USB foreground loops (called from core1_entry) ---- */
 
+/* Host loop: tuh_task drives enumeration; tuh_midi_rx_cb feeds the parser.
+ * Run-loop split credited to Music Thing Workshop System 33_drumdrum. */
+static void run_host_loop(void) {
+    while (true) {
+        tuh_task();
+    }
+}
+
+/* Device loop: SysEx CLI + DAW MIDI over the USB device stack. */
+static void run_device_loop(void) {
     /* ParserState carries a ~9 KB wire_buf; Core 1's stack is 2 KB.
      * Static keeps it in BSS. */
     static lenssysex::ParserState parser;
@@ -581,6 +640,7 @@ static void __not_in_flash_func(core1_entry)(void) {
         while (tud_midi_available()) {
             uint32_t n = tud_midi_stream_read(in_buf, sizeof(in_buf));
             for (uint32_t bi = 0; bi < n; bi++) {
+                midi_feed_byte(in_buf[bi]);
                 if (lenssysex::feed_byte(&parser, in_buf[bi])) {
                     /* Complete frame received. */
                     uint8_t cmd = lenssysex::get_command(&parser);
@@ -592,10 +652,11 @@ static void __not_in_flash_func(core1_entry)(void) {
                             lenssysex::sysex_send_nack(lenssysex::CMD_WRITE_STATE,
                                                         lenssysex::NACK_BUSY);
                         } else {
-                            size_t n = lenssysex::get_payload(
+                            size_t plen = lenssysex::get_payload(
                                     &parser, g_pending.bytes, lenssysex::SOURCE_CAP);
-                            if (n > 0) {
-                                g_pending.len   = n;
+                            if (plen > 0) {
+                                g_pending.len   = plen;
+                                __dmb();   /* len visible before Core 0 observes ready */
                                 g_pending.ready = true;
                                 /* ACK after queuing; Core 0 applies on next sample. */
                                 lenssysex::sysex_send_frame(lenssysex::CMD_ACK, nullptr, 0);
@@ -723,9 +784,9 @@ static void __not_in_flash_func(core1_entry)(void) {
                         uint32_t avg_io   = count_n ? (sum_io   / count_n) : 0u;
 
                         /* Response payload (PERF_DUMP):
-                           ver u8, sec_count u8, count u16, must u16, stride u16,
-                           sysclk u32, samples u32, block_us u32, core1_loops u32,
-                           total_avg u32, total_max u32, late u32, db_full u32,
+                           ver u8, sec_count u8, count u16, reserved u16, reserved u16,
+                           sysclk u32, samples u32, reserved u32, core1_loops u32,
+                           total_avg u32, total_max u32, reserved u32, reserved u32,
                            walk_avg u32, io_avg u32  (sec_count=2 sections). */
                         uint8_t perf[48];
                         size_t  pi = 0;
@@ -733,8 +794,8 @@ static void __not_in_flash_func(core1_entry)(void) {
                         perf[pi++] = 2;          /* sec_count: walk + io */
                         perf[pi++] = (uint8_t)(count_n & 0xFFu);
                         perf[pi++] = (uint8_t)((count_n >> 8) & 0xFFu); /* count u16 */
-                        perf[pi++] = 0; perf[pi++] = 0;                 /* must u16 */
-                        perf[pi++] = 0; perf[pi++] = 0;                 /* stride u16 */
+                        perf[pi++] = 0; perf[pi++] = 0;                 /* reserved u16 */
+                        perf[pi++] = 0; perf[pi++] = 0;                 /* reserved u16 */
                         /* sysclk u32 = 250_000_000 = 0x0EE6B280 LE */
                         perf[pi++] = 0x80; perf[pi++] = 0xB2; perf[pi++] = 0xE6; perf[pi++] = 0x0E;
                         /* samples = head */
@@ -742,8 +803,12 @@ static void __not_in_flash_func(core1_entry)(void) {
                         perf[pi++] = (uint8_t)((head >> 8)  & 0xFFu);
                         perf[pi++] = (uint8_t)((head >> 16) & 0xFFu);
                         perf[pi++] = (uint8_t)((head >> 24) & 0xFFu);
-                        perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; /* block_us */
-                        perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; /* core1_loops */
+                        /* reserved u32 */
+                        perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0;
+                        /* core1_loops: real count of Core 1 walks since boot */
+                        { uint32_t cl = g_core1_loops;
+                          perf[pi++] = (uint8_t)(cl & 0xFFu);       perf[pi++] = (uint8_t)((cl >> 8) & 0xFFu);
+                          perf[pi++] = (uint8_t)((cl >> 16) & 0xFFu); perf[pi++] = (uint8_t)((cl >> 24) & 0xFFu); }
                         /* total_avg */
                         perf[pi++] = (uint8_t)(avg & 0xFFu);
                         perf[pi++] = (uint8_t)((avg >> 8)  & 0xFFu);
@@ -754,7 +819,7 @@ static void __not_in_flash_func(core1_entry)(void) {
                         perf[pi++] = (uint8_t)((mx >> 8)  & 0xFFu);
                         perf[pi++] = (uint8_t)((mx >> 16) & 0xFFu);
                         perf[pi++] = (uint8_t)((mx >> 24) & 0xFFu);
-                        /* late, db_full */
+                        /* reserved u32 x2 */
                         perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0;
                         perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0; perf[pi++] = 0;
                         /* section averages: walk_avg, io_avg */
@@ -821,9 +886,41 @@ static void __not_in_flash_func(core1_entry)(void) {
             }
         }
 
+        /* Drain MIDI output ring -> USB MIDI TX (device-only). */
+        if (tud_midi_mounted()) {
+            uint8_t midi_tx_buf[4];
+            uint8_t midi_tx_len;
+            while ((midi_tx_len = midi_out_pop(midi_tx_buf)) > 0)
+                tud_midi_stream_write(0, midi_tx_buf, midi_tx_len);
+        }
+
         /* Audio work is in the FIFO doorbell IRQ (see core1_doorbell_irq).
          * The foreground loop owns USB only. */
     }
+}
+
+/* The app-level MIDI host driver registers itself: usb_midi_host_app_driver.c
+ * provides usbh_app_driver_get_cb, called once during tuh_rhport_init. */
+
+/* ---- Core 1 entry ---- */
+
+static void __not_in_flash_func(core1_entry)(void) {
+    /* USB stack init runs on Core 1 so the USB IRQ lands on Core 1's NVIC.
+     * board_init() runs here in host mode, on Core 0 in device mode (role split
+     * below and in main()). 33_drumdrum inits the device stack on Core 0 instead.
+     * RHPORT0 is HOST|DEVICE, so tusb_init() (not tuh_init) configures the
+     * controller for the chosen role (per 33_drumdrum). */
+    bool host = (bool)g_usb_host_mode;
+    if (host) { board_init(); tusb_init(); } else tud_init(0);
+
+    multicore_fifo_clear_irq();
+    irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_doorbell_irq);
+    irq_set_priority(SIO_IRQ_PROC1, 0xC0);
+    irq_set_enabled(SIO_IRQ_PROC1, true);
+
+    midi_reset();
+
+    if (host) run_host_loop(); else run_device_loop();
 }
 
 /* ---- main ---- */
@@ -845,9 +942,16 @@ int main(void) {
     card.EnableNormalisationProbe();
     dwt_enable();
 
-    /* SPEC: board_init() on Core 0 only; never from Core 1.
-     * Then launch Core 1 so tud_init runs on its NVIC. */
-    board_init();
+    /* Read USB-C CC pins to select USB role for this power cycle.
+     * DFP = a downstream device (keyboard) is plugged in = host mode.
+     * UFP (computer) or Unsupported (non-Rev1_1 board) = device mode.
+     * Detection runs on Core 0 before Core 1 launches; USB init is deferred to Core 1.
+     * Role-detection approach credited to Music Thing Workshop System 33_drumdrum. */
+    g_usb_host_mode = (card.ReadUSBPowerState() == ComputerCard::DFP) ? 1u : 0u;
+
+    /* board_init() (rp2040 USB hardware bring-up) runs on Core 0 in device mode;
+     * in host mode Core 1 runs it, so Core 0 skips it here. */
+    if (!g_usb_host_mode) board_init();
     multicore_launch_core1(core1_entry);
 
     card.Run(); /* never returns */

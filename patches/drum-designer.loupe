@@ -1,0 +1,73 @@
+; Drum designer: three built-in drum voices (kick / snare / hat) you shape live
+; and save. Tap the switch DOWN to step through the voices (kick -> snare -> hat);
+; LEDs 0..2 show the one you are editing. All three knobs shape the selected voice:
+;
+;   kick    main = decay   x = drive (clean..gritty)   y = sweep (pitch drop)
+;   snare   main = decay   x = snap (body..noise)      y = tone (noise colour)
+;   hat     main = decay   x = tone (full..thin)       y = pitch
+;
+; Knobs are soft-takeover, so paging never jerks a setting and every voice keeps
+; its own values. Hold the switch down ~5 s to save the kit to flash; the saved
+; values reload on power-up. (A save also steps the voice on by one.)
+;
+; pulse-in 1 = clock. Patch a clock and the kit plays in time; unpatched, an
+; internal tempo keeps it going. The default groove is kick four-on-the-floor,
+; a syncopated snare, and 16th-note hats.
+; Patch a per-voice trigger to play that voice directly instead of its pattern:
+;   pulse-in 2 = kick      cv-in 2 = hat   (snare plays its pattern only)
+; cv-in 1 = hat decay modulation: a bipolar CV added to the hat decay knob.
+;
+; audio-out 1 = kick      audio-out 2 = snare + hat
+; LEDs 0..2 = selected voice      LEDs 3..5 = hit flash (kick / snare / hat)
+(patch
+  (def master (normal (pulse-in :1) (clock :bpm 480)))   ; ext clock, else ~120 bpm 16ths
+
+  ; voice selection: a 0..2 counter that steps on each switch-down tap
+  (def page (edge (eq (switch :z) VMIN)))
+  (def vsel (hold v (mod (add v 1) 3) :trig page :init 0))
+
+  ; one soft-takeover knob per voice. It only moves while its voice is selected,
+  ; so each voice keeps its own value and the Z-save snapshots them to flash.
+  (def pk-main (fn (sel init) (pickup (knob :main) :on (eq vsel sel) :init init)))
+  (def pk-x    (fn (sel init) (pickup (knob :x)    :on (eq vsel sel) :init init)))
+  (def pk-y    (fn (sel init) (pickup (knob :y)    :on (eq vsel sel) :init init)))
+
+  ; default groove, clocked by master (one bar of 16ths). A voice follows its own
+  ; jack instead whenever that jack is patched.
+  (def k-trig (normal (pulse-in :2) (onsets (beat '(x . . . x . . . x . . . x . . .)) master)))
+  ; read a clock/trigger from a CV jack: fire when the signal swings clear of its
+  ; resting midpoint. Works for either polarity and resets cleanly each pulse,
+  ; where a midpoint schmitt would latch high on a 0..+5V gate and never retrigger.
+  (def cv-trig (fn (cv) (edge (gt (abs (sub cv VMID)) 400))))
+
+  (def s-trig (onsets (beat '(. . x . . x . . x . . . x . . .)) master))
+  (def h-trig (if (connected (cv-in :2))
+                  (cv-trig (cv-in :2))
+                  (onsets (beat '(x x x x x x x x x x x x x x x x)) master)))
+
+  (def kick-v (kick :trig  k-trig
+                    :midi  C2
+                    :decay (pk-main 0 2600)
+                    :drive (pk-x    0 800)
+                    :sweep (pk-y    0 1800)))
+
+  (def snare-v (snare :trig   s-trig
+                      :decay  (pk-main 1 1100)
+                      :snappy (pk-x    1 2600)
+                      :tone   (pk-y    1 2048)))
+
+  (def hat-v (hat :trig  h-trig
+                  :decay (add (pk-main 2 700) (cv-in :1 :bipolar))   ; knob + cv-in 1
+                  :tone  (pk-x    2 2600)
+                  :midi  (add 81 (spread (pk-y 2 2048) 24))))   ; pitch sweeps A5..A7
+
+  (<- (audio-out :1) kick-v)
+  (<- (audio-out :2) (mix snare-v hat-v))
+
+  ; LEDs 0..2 mark the selected voice; 3..5 flash on each voice's hit
+  (<- (led :0) (if (eq vsel 0) 4095 0))
+  (<- (led :1) (if (eq vsel 1) 4095 0))
+  (<- (led :2) (if (eq vsel 2) 4095 0))
+  (<- (led :3) (envelope :trig k-trig :decay 600))
+  (<- (led :4) (envelope :trig s-trig :decay 600))
+  (<- (led :5) (envelope :trig h-trig :decay 600)))

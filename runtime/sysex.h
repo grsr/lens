@@ -28,7 +28,6 @@ constexpr uint8_t CMD_DIAG_DUMP     = 0x12;
 constexpr uint8_t CMD_SLOT_PERF_DUMP = 0x13;
 constexpr uint8_t CMD_ACK           = 0x7F;
 constexpr uint8_t CMD_NACK          = 0x7E;
-constexpr uint8_t CMD_WRITE         = CMD_WRITE_STATE;  /* back-compat */
 
 /* NACK reason codes (byte after orig_cmd in NACK payload). */
 constexpr uint8_t NACK_BUSY         = 0x01;

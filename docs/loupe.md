@@ -79,13 +79,18 @@ direction-typed: reading an output or writing an input is a compile error.
   reads the jack as a pitch.
 - `(audio-in :1)`: an audio input.
 - `(pulse-in :1)`: a pulse/gate input.
-- `(knob :main)` / `(knob :x)` / `(knob :y)`: the three knobs. Detented by
-  default at the rails and centre so they snap cleanly past ADC jitter. Pass
-  `:detent 0` to read the raw pot, or `:detent N` to set the snap zone
-  half-width.
+- `(knob :main)` / `(knob :x)` / `(knob :y)`: the three knobs, raw by default.
+  Pass `:detent` to snap cleanly to the rails and centre past ADC jitter, or
+  `:detent N` to set the snap-zone half-width.
 - `(switch :z)`: the Z-switch. Returns one of the three rails (`VMIN` down,
   `VMID` middle, `VMAX` up), so a switch is a three-position knob in the same
   value domain.
+- MIDI, from a USB keyboard plugged straight into the card or notes from a
+  computer: `(midi-note)` (held pitch), `(midi-gate)`, `(midi-velocity)`,
+  `(midi-cc :1)` (CC number 1, the label names the CC), `(midi-bend)`,
+  `(midi-pressure)`, `(midi-trig :note 60)` (a trigger per note-on of one key),
+  and `(midi-clock)` / `(midi-playing)` for transport. Add `:ch N` to read one
+  channel; omit it for omni.
 
 **Outputs** (used as the sink, the left side of a `<-`):
 
@@ -93,9 +98,12 @@ direction-typed: reading an output or writing an input is a compile error.
 - `(<- (audio-out :1) expr)`
 - `(<- (pulse-out :1) expr)`
 - `(<- (led :0) expr)`: the panel LEDs, 0..5.
+- `(<- (midi-note-out :ch 1) pitch :gate g :vel v)`: send MIDI notes; the gate
+  decides note-on/off. `(<- (midi-cc-out :ch 1 :cc 1) value)` sends a CC, and
+  `(<- (midi-clock-out) clk)` sends MIDI clock, so the card can drive a synth or
+  a DAW.
 
-There are no bare aliases like `cv-out-1`. If you want the brevity, define your
-own: `(def out (cv-out :1 :bipolar))`.
+For a shorter name, define your own alias: `(def out (cv-out :1 :bipolar))`.
 
 `(normal jack default)` reads a jack but falls back to `default` when nothing
 is patched in. It is how a patch takes an external clock when one is present
@@ -107,22 +115,42 @@ and runs on its own tempo otherwise:
 
 ## The cable
 
-`<-` is the only way to send something to a sink (a jack, an LED, a tape, or a
-named output of a function you defined). It reads sink-first:
+A Loupe patch is a eurorack patch written down. You name an output jack and
+trace the cable back to where the signal comes from. `<-` is that cable: the
+value on the right flows into the destination on the left.
 
 ```lisp
-(<- (audio-out :1) (vca env) (lpf :cut 1500) osc)
+(<- (audio-out :1) (vca (sine pitch) env))
 ```
 
-means: into `audio-out :1` goes the audio from `osc`, run through `lpf` at 1500,
-then through `vca env`. The sink is on the left, the source is on the right, the
-stages in between read from the source end. As a nested expression the same line
-would be `(vca (lpf osc 1500) env)`; the cable form is that expression unfolded
-into a flat line, which scales to long signal chains more comfortably than
-nested parens.
+reads "audio-out 1 is fed by the sine, through the vca." The destination on the
+left can be a jack, an LED, a tape, or a named output of a function you wrote;
+everything to the right of it is the signal.
 
-There is no `->` and no shorthand. If a line wires something into a sink, it
-starts with `<-`.
+When the signal is a chain, write the stages one per line and let the cable
+thread them right-to-left. The last stage is the source; each stage above
+receives the running signal as its **first** input:
+
+```lisp
+(<- (audio-out :1)              ; out
+    (vca env)                   ;  through a vca (env is the amp)
+    (lpf :cut 1500)             ;  through a low-pass at 1500
+    (sine pitch))               ;  from a sine
+```
+
+That is exactly `(vca (lpf (sine pitch) :cut 1500) env)` unfolded into a flat
+column. The chain is pure sugar for the nested form, so the two are
+interchangeable and you can always fall back to nesting.
+
+Read top-to-bottom it is the signal path, which makes the spine of a patch read
+like its diagram. The branches (a side-chain like `env`, or a signal that fans
+out to two places) are the cables that come in from the side: declare them as a
+`def` just above and reference them by name.
+
+The thread always lands the signal in a stage's first input. When a stage needs
+it somewhere else, or you want a non-default port off a multi-output function
+mid-chain, break that stage out into a `def` and reference it. Every line that
+wires something into a destination starts with `<-`.
 
 ## Builtins
 
@@ -136,7 +164,7 @@ The runtime kernels live in `runtime/`.
   given tape), `wave` (play a tape as a sample or wavetable), `tap` (read behind
   an audio buffer's write head -- a delay).
 - **Clocks and time:** `clock` (the master), `follow` (a derived clock at a
-  ratio), `trig` (a trigger pulse on each rising edge, defaults to master), `turns`, `every` (a divider),
+  ratio), `trig` (a trigger pulse on each wrap, the downbeat; defaults to master), `turns`, `every` (a divider),
   `euclid`.
 - **Filters and shaping:** `vcf` (resonant SVF: lp/hp/bp/notch), `lpf`/`hpf`
   (one-pole), `average`, `lpg`, `slew`, `wavefold`, `crush`, `envfollow`,
@@ -149,7 +177,15 @@ The runtime kernels live in `runtime/`.
 - **Random:** `random`, `walk`, `spread`.
 - **Drums:** `kick`, `snare`, `hat`, and `groove`, a kit builder that triggers
   each voice on its `:on` rhythm pattern and mixes them.
+- **FM:** `(dx :bank N :preset P :pitch note :gate g :decay d :tone t)` plays a
+  6-operator DX7 voice from a flash bank; `:bank`/`:preset` pick the voice,
+  `:tone` shifts FM brightness. See "Loading DX7 voice banks" in the README.
 - **Selection and routing:** `thru`, `squint`, `switch`.
+- **MIDI:** in with `midi-note`, `midi-gate`, `midi-velocity`, `midi-cc`, `midi-bend`,
+  `midi-trig`; out by writing `(midi-note-out :ch N)`, `(midi-cc-out ...)`,
+  `(midi-clock-out)`. Play the card from a USB keyboard plugged straight into its
+  USB-C port or from a DAW, or have it drive an external synth or clock. The
+  `midi-*.loupe` patches show both directions.
 
 Most builtins take keyword arguments (`:cut`, `:trig`, `:scale`, `:decay`, and
 so on) on top of positional ones. Pass an unknown keyword and the compiler
@@ -248,8 +284,11 @@ rhythms to start from and mutate: `four-on-floor`, `backbeat`, `eighths`,
 ### Reading and writing a tape
 
 `step` reads one cell per clock tick. `seek` reads at an explicit index.
-`lookup` reads a given tape at an index. Writing into a tape is just a `<-`
-cable whose sink is the tape. The cable carries extra keywords:
+`lookup` reads a given tape at an index. A tape also behaves like a function of
+an index: `(t i)` reads cell `i`, and `(<- (t i) v)` writes `v` there, so a patch
+can read and rewrite its own cells at arbitrary positions. Writing into a tape is
+otherwise just a `<-` cable whose sink is the tape, carrying extra keywords for a
+clocked or streaming write head:
 
 - `:trig C` drives the write head from clock `C` (default: master).
 - `:per-sample` writes one cell per audio sample.
@@ -293,7 +332,8 @@ Treat it as a fun constraint.
 A clock is a slow phasor. When the phase rolls over, the clock fires. `(clock :tempo (knob :x))` makes the
 master; the prelude already defines `master`, and most readers (`step`, `tap`,
 `wave`) take a `:trig` argument that defaults to it. `trig` converts a clock (or
-any signal) to a trigger pulse on each rising edge, defaulting to master: `(trig)` and `(trig master)` are the same.
+any signal) to a trigger pulse on each falling edge (for a phasor, the wrap, which
+marks the downbeat), defaulting to master: `(trig)` and `(trig master)` are the same.
 `follow` derives a related clock: `(follow master :div 4)` runs a quarter as
 fast, `(follow clk :mult 4)` four times as fast. `every` divides one.
 
@@ -392,6 +432,14 @@ expression to return:
 
 It is called like any builtin: `(lopass-gate (audio-in :1) (pulse-in :1) (knob :x))`.
 
+By convention a function's **first input is its signal input**, the thing it
+processes, with the rest (cutoff, amp, decay) as trailing arguments or keywords.
+The builtins follow this: `lpf`, `vca`, `transpose` and `quantise` all take their
+signal first. It is what lets a function sit in a cable chain: the cable threads
+the running signal into each stage's first input (see The cable), so a function
+whose first input is its signal drops into a chain with nothing written, while
+one that takes a parameter first cannot. Put the signal first.
+
 If a function needs more than one output, list them after `=>` and write each
 one with `<-`, the same way a patch wires the card's jacks:
 
@@ -479,9 +527,11 @@ to the top note of the scale, rarely what you want. Map it into a useful range
 first: `(snap (add C3 (spread (random) 25)) :scale minor)` gives two octaves of
 minor-scale notes from C3.
 
-Long signal chains read better broken into `def`s with named intermediates.
-Nothing stops you writing a six-stage cable, but a reader (including future you)
-will thank you for naming the envelope, the filtered tone, and the gated output.
+A cable chain is the signal's spine; declare the branches as named `def`s above
+it. A side-chain (an envelope feeding a vca's amp) and a signal that fans out to
+two jacks are the cables that come in from the side, so naming them keeps the
+chain a single clean column and a reader (including future you) can see the
+shape at a glance.
 
 The compiler removes redundancy. A constant compiles once. Anything you name
 with `def` compiles once, and every reference is the same shared node. Two

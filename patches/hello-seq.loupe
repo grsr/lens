@@ -6,6 +6,7 @@
   (def melody (tape '(C3 Eb3 G3 Bb3)))
 
   (def voice  (step melody))
+
   (<- (cv-out :1 :v-oct) voice)
-  (<- (pulse-out :1) (trig))
-  (<- (audio-out :1) (sine voice)))
+  (<- (pulse-out :1)     (trig))
+  (<- (audio-out :1)     (sine voice)))

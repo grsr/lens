@@ -11,9 +11,11 @@
 
 (def noise-drum (fn (:trig :cut :decay => :out)
   ; noise band: high-pass roar shaped by a low-pass to leave a usable band.
-  (<- out (vca (lpf :in (hpf :in (noise) :cut (div cut 2))
-                    :cut cut)
-               (envelope :trig trig :decay decay)))))
+  (<- out
+      (vca (envelope :trig trig :decay decay))   ; envelope is the amp
+      (lpf :cut cut)
+      (hpf :cut (div cut 2))
+      (noise))))
 
 (patch
   (def master  (clock :bpm 200))

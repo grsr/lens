@@ -4,5 +4,10 @@
 (def turing-185 (fn (:prob :trans => :out :trig)
   (def loop (tape '(800 1600 2400 3200 800 1600 2400 3200)))
   (<- loop (if (chance prob) (step loop) (random)))
-  (<- out  (quantise (transpose (transpose (spread (step loop) 24) (spread trans 24)) 48) minor))
+  (<- out
+      (quantise minor)             ; snap to scale
+      (transpose 48)               ; up into range
+      (transpose (spread trans 24)); shift by the :trans knob
+      (spread 24)                  ; widen the loop's steps
+      (step loop))                 ; the looping tape
   (<- trig (trig))))

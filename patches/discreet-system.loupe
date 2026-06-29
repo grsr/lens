@@ -9,7 +9,8 @@
 (patch
   (def feedback (knob :main))
   (def tempo    (knob :x))
-  (def drift    (bipolar (knob :y)))                    ; noon = locked; either side drifts the voices apart
+  (def drift    (bipolar (knob :y)))   ; noon = locked; either side drifts the voices apart
+
   (def master (clock :tempo tempo))
   (def b2     (follow master :mult 1 :drift drift))
 
@@ -23,9 +24,9 @@
   (def echo (tap delaybuf :amount VMAX :span))   ; fixed full-length delay, no glide
 
   (<- (cv-out :1 :v-oct) (step (t1 :notes) :trig master))
-  (<- (pulse-out :1) (onsets (t1 :rhythm) :trig master))
+  (<- (pulse-out :1)     (onsets (t1 :rhythm) :trig master))
   (<- (cv-out :2 :v-oct) (step (t2 :notes) :trig b2))
-  (<- (pulse-out :2) (onsets (t2 :rhythm) :trig b2))
+  (<- (pulse-out :2)     (onsets (t2 :rhythm) :trig b2))
 
   ; sum the dry voices with the attenuated echo, low-pass, then soft-clip into the
   ; audio range before writing. the delay buffer is signed 12-bit and its write wraps

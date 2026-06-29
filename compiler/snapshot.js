@@ -13,7 +13,7 @@
 //   CRC32 (4 bytes, IEEE 802.3)
 
 const MAGIC = [0x4C, 0x45, 0x4E, 0x53, 0x32]; // snapshot wire magic, 5 bytes; matches LENS_MAGIC in runtime/snapshot_format.h
-const VERSION = 10;
+const VERSION = 11;
 
 // SPEC: jack id encoding.
 const JACK_IDS = {
@@ -37,18 +37,13 @@ const BUF_KINDS = { tape: 0, audio: 1, lens: 2 };
 const BUF_KIND_NAMES = ['tape', 'audio', 'lens'];
 
 // SPEC: param0 holds the one structural word a kernel needs (mode/jack/port/mask/
-// seed/flags). Every other value a kernel reads is an input.
-// An explicit 'param0' key maps directly; otherwise a single named kwarg folds in.
-// A nonzero p1 is a compile error (asserted at the write site).
+// seed/flags). Every other value a kernel reads is an input. An explicit 'param0'
+// key maps directly; otherwise a single named numeric kwarg folds in (by sorted key).
 function encodeParams(params) {
-  if (!params) return [0, 0];
-  if ('param0' in params || 'param1' in params) {
-    return [(params.param0 ?? 0) >>> 0, (params.param1 ?? 0) >>> 0];
-  }
+  if (!params) return 0;
+  if ('param0' in params) return (params.param0 ?? 0) >>> 0;
   const keys = Object.keys(params).sort();
-  const p0 = keys.length > 0 ? (params[keys[0]] >>> 0) : 0;
-  const p1 = keys.length > 1 ? (params[keys[1]] >>> 0) : 0;
-  return [p0, p1];
+  return keys.length > 0 ? (params[keys[0]] >>> 0) : 0;
 }
 
 // ---- CRC-32 IEEE 802.3 (polynomial 0xEDB88320) ----
@@ -132,9 +127,6 @@ function encode(scheduled, graph) {
     }
   }
 
-  // Also register kernels for terminal slots (they're already in allEntries, but double-check).
-  // (terminals reference slot_ids which are all in allEntries, so no extra work needed.)
-
   // Buffer id -> index (already sequential from lowerer, but use explicit map).
   const bufIndex = new Map(graph.buffers.map((b, i) => [b.id, i]));
 
@@ -195,9 +187,7 @@ function encode(scheduled, graph) {
     }
 
     w.u16(0); /* out_offset: runtime computes from sizeof; write 0 */
-    const [p0, p1] = encodeParams(slot.params);
-    if (p1 !== 0) throw new Error(`${slot.kernel}: param1 is retired; structural data must fit param0`);
-    w.u32(p0);
+    w.u32(encodeParams(slot.params));
   }
 
   // SLOT TABLE: every slot in walk order.
@@ -236,19 +226,23 @@ function encode(scheduled, graph) {
     throw new Error(`patch exceeds LENS_MAX_BUFFERS (used ${graph.buffers.length}, limit ${LENS_MAX_BUFFERS})`);
   if (graph.terminals.length > LENS_MAX_TERMINALS)
     throw new Error(`patch exceeds LENS_MAX_TERMINALS (used ${graph.terminals.length}, limit ${LENS_MAX_TERMINALS})`);
-  let audioBytes = 0, controlBytes = 0, constCount = 0;
+  let audioBytes = 0, controlBytes = 0;
   for (const buf of graph.buffers) {
     /* 12-bit packed: 2 cells per 3 bytes; round up. */
     const bytesPacked = (buf.length * 3 + 1) >> 1;
     if (buf.kind === 'audio') audioBytes += bytesPacked;
     else controlBytes += bytesPacked;
   }
+  // The runtime const pool dedupes identical values (one word per distinct value),
+  // so the budget is the count of DISTINCT constants, not of constant uses.
+  const constVals = new Set();
   for (const entry of allEntries) {
     const slot = slotMap.get(entry.slotId);
     if (slot) {
-      for (const ref of (slot.in || [])) if (ref.kind === 'const') constCount++;
+      for (const ref of (slot.in || [])) if (ref.kind === 'const') constVals.add(Math.round(ref.value));
     }
   }
+  const constCount = constVals.size;
   if (audioBytes > LENS_AUDIO_BUFFER_BYTES)
     throw new Error(`patch exceeds LENS_AUDIO_BUFFER_BYTES (used ${audioBytes}, limit ${LENS_AUDIO_BUFFER_BYTES})`);
   if (controlBytes > LENS_CONTROL_BUFFER_BYTES)

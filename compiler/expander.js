@@ -2,6 +2,13 @@
 
 const { read } = require('./reader.js');
 
+// Ops that accept :trig and default it to the master clock when it is absent
+// (and no alternative rate kwarg :hz/:bpm is given).
+const CLK_OPS = new Set(['trig', 'step', 'seek', 'turns', 'every', 'random', 'chance', 'walk',
+  'euclid', 'hits', 'gates', 'onsets', 'groove',
+  'recordhead-per-cell', 'recordhead-gated',
+  'recordhead-len-capped', 'recordhead-len-capped-gated']);
+
 function makeEnv(parent) {
   return { bindings: Object.create(null), parent };
 }
@@ -22,7 +29,7 @@ function envBind(env, name, value) {
 }
 
 // Bind a (def ...) form into env.
-//   (def NAME EXPR)        scalar bind.
+//   (def NAME EXPR)        scalar bind (a timeless wire). State lives in `hold`.
 //   (def (a b c))          bind each name to its index 0,1,2,...
 //   (def (a b c) SRC)      destructure SRC's cells, recycling (wrapping) to
 //                          cover the names; a scalar SRC broadcasts to all.
@@ -134,6 +141,23 @@ function splitArgs(argNodes) {
     }
   }
   return { positional, kwargs };
+}
+
+// Thread positional stage-forms right-to-left into one nested form: the
+// rightmost is the source; each stage to its left receives the running signal
+// as its first input. `(<- out (vca amp) (lpf :cut c) osc)` becomes
+// `(vca (lpf osc :cut c) amp)`. A bare symbol stage applies to the signal.
+function threadStages(stages) {
+  let sig = stages[stages.length - 1];
+  for (let i = stages.length - 2; i >= 0; i--) {
+    const stage = stages[i];
+    if (stage.t === 'list' && stage.items.length > 0) {
+      sig = { t: 'list', items: [stage.items[0], sig, ...stage.items.slice(1)] };
+    } else {
+      sig = { t: 'list', items: [stage, sig] };
+    }
+  }
+  return sig;
 }
 
 // Resolve a score/notes item sym through env; _ and ~ stay as syms (rest/tie).
@@ -255,6 +279,12 @@ function buildThru(listResolved, atArg) {
   if (listResolved.t === 'lens' && isBufferLens(listResolved)) {
     return { t: 'buflens-sel', cells: listResolved.items, at: atArg };
   }
+  // A lens of computed values (anything other than plain numeric data) is selected
+  // with an if-tree mux that reads each value as a live input. A pure-number lens
+  // (a scale, etc.) stays a data thru: op_thru decodes one cell from the buffer.
+  if (listResolved.t === 'lens' && !listResolved.items.every(it => it && it.t === 'num')) {
+    return { t: 'opthru', results: listResolved.items, at: atArg };
+  }
   return { t: 'call', op: 'thru', args: [listResolved, atArg], kwargs: {} };
 }
 
@@ -262,7 +292,7 @@ function buildThru(listResolved, atArg) {
 // whose cells are numbers (a scale, decoded to a value by op_thru).
 function isBufferLens(lensNode) {
   return lensNode.items.length > 0
-    && lensNode.items.every(it => it && it.t === 'tape');
+    && lensNode.items.every(it => it && (it.t === 'tape' || it.t === 'audio'));
 }
 
 // Distribute a primitive call over a buflens-sel argument: the call is rebuilt
@@ -366,6 +396,16 @@ function expandNode(node, env, ctx) {
   }
 
   if (name === 'tape') {
+    // (tape :len N): a blank tape of N cells. Length is stated directly in cells,
+    // the tape's own unit -- no reverse-engineering from seconds and a clock rate.
+    const lenIdx = items.findIndex(it => it.t === 'kw' && it.s === 'len');
+    if (lenIdx >= 0) {
+      const nNode = expandNode(items[lenIdx + 1], env, ctx);
+      if (!nNode || nNode.t !== 'num') {
+        throw new Error('tape :len must be a constant number of cells');
+      }
+      return { t: 'tape', items: [], blankLen: nNode.v };
+    }
     let subkind = null;
     let quoteNode;
     if (items.length === 2 && items[1].t === 'quote') {
@@ -387,59 +427,50 @@ function expandNode(node, env, ctx) {
       ? expandQuoteItems(quoteNode, forNotes, env)
       : [expandNode(quoteNode, env, ctx)];
 
-    // Resolve sym cells (x, ., note names, etc.) through the env so lowerTape
-    // receives only num nodes. Throw on any sym that does not resolve.
-    const resolvedItems = rawItems.map(item => {
-      if (item.t !== 'sym') return item;
-      const r = envLookup(env, item.s);
-      if (r.found) return r.value;
-      throw new Error(`unknown name: ${item.s}`);
-    });
-
-    // Subkind name resolution: when subkind names a binding in scope that is a
-    // lens or oplens, resolve each seed item sym to its index in that binding's
-    // cells. Numeric literals pass through as direct indices.
-    let tapeItems = resolvedItems;
-    if (subkind && !forNotes) {
-      const lookup = envLookup(env, subkind);
-      if (lookup.found) {
-        const binding = lookup.value;
-        if (binding.t !== 'lens' && binding.t !== 'oplens') {
-          throw new Error(
-            `tape: subkind "${subkind}" must be a lens or op-lens; got "${binding.t}"`
-          );
-        }
-        const cellNames = binding.names || null;
-        if (!cellNames) {
-          throw new Error(
-            `tape: subkind "${subkind}" has no cell names; cannot resolve items`
-          );
-        }
-        if (rawItems.length === 0) {
-          throw new Error(
-            `tape: subkind "${subkind}" seed must not be empty`
-          );
-        }
-        tapeItems = rawItems.map(item => {
-          if (item.t === 'num') return item; // numeric literal -> direct index
-          const itemName = item.t === 'sym' ? item.s : null;
-          if (itemName === null) {
-            throw new Error(
-              `tape: subkind "${subkind}" seed item must be a sym or number; got "${item.t}"`
-            );
-          }
-          const idx = cellNames.indexOf(itemName);
-          if (idx === -1) {
-            throw new Error(
-              `tape: item "${itemName}" not found in "${subkind}" (cells: ${cellNames.join(', ')})`
-            );
-          }
-          return { t: 'num', v: idx };
-        });
+    // When the subkind names a lens/op-lens binding in scope, the seed items are
+    // its cell names: resolve each to its index in that binding, NOT through the
+    // global env (so an item missing from the binding names the binding, not a
+    // bare "unknown name"). Otherwise resolve sym cells (x, ., note names, etc.)
+    // through the env so lowerTape receives only num nodes.
+    const subBinding = (subkind && !forNotes) ? envLookup(env, subkind) : { found: false };
+    let tapeItems;
+    if (subBinding.found && (subBinding.value.t === 'lens' || subBinding.value.t === 'oplens')) {
+      const cellNames = subBinding.value.names || null;
+      if (!cellNames) {
+        throw new Error(`tape: subkind "${subkind}" has no cell names; cannot resolve items`);
       }
-      // If subkind does not resolve (not found in env), fall through and keep
-      // raw items (the subkind may be an intrinsic tag handled elsewhere, or
-      // the user misspelled a name -- unresolved syms are already tracked).
+      if (rawItems.length === 0) {
+        throw new Error(`tape: subkind "${subkind}" seed must not be empty`);
+      }
+      tapeItems = rawItems.map(item => {
+        if (item.t === 'num') return item; // numeric literal -> direct index
+        const itemName = item.t === 'sym' ? item.s : null;
+        if (itemName === null) {
+          throw new Error(
+            `tape: subkind "${subkind}" seed item must be a sym or number; got "${item.t}"`
+          );
+        }
+        const idx = cellNames.indexOf(itemName);
+        if (idx === -1) {
+          throw new Error(
+            `tape: item "${itemName}" not found in "${subkind}" (cells: ${cellNames.join(', ')})`
+          );
+        }
+        return { t: 'num', v: idx };
+      });
+    } else if (subBinding.found) {
+      throw new Error(
+        `tape: subkind "${subkind}" must be a lens or op-lens; got "${subBinding.value.t}"`
+      );
+    } else {
+      // No subkind binding (plain tape, or an intrinsic tag handled elsewhere):
+      // resolve seed syms through the env; throw on any that does not resolve.
+      tapeItems = rawItems.map(item => {
+        if (item.t !== 'sym') return item;
+        const r = envLookup(env, item.s);
+        if (r.found) return r.value;
+        throw new Error(`unknown name: ${item.s}`);
+      });
     }
 
     const result = { t: 'tape', items: tapeItems };
@@ -511,14 +542,53 @@ function expandNode(node, env, ctx) {
     return { t: 'z1', x: expandNode(items[1], env, ctx) };
   }
 
-  if (name === 'notes') {
-    const arg = items[1];
-    if (arg && arg.t === 'sym') {
-      const r = envLookup(env, arg.s);
-      if (r.found) return r.value;
-      throw new Error(`unknown name: ${arg.s}`);
+  // hold -- a sample & hold. Two shapes, told apart by whether it carries a clock:
+  //   (hold VAL ON) | (hold VAL :on ON)     level S&H (op_hold): track VAL while ON
+  //   (hold NAME NEXT :trig C | :per-sample [:init V])   a register/fold: NAME reads
+  //       the held value, NEXT is stored each clock edge (or sample). NEXT may use
+  //       NAME for feedback (counters, accumulators).
+  //   (hold VAL :trig C | :per-sample [:init V])         edge/per-sample S&H of VAL.
+  // The register desugars to a one-cell tape read by lookup (no head dependency, so
+  // the feedback is a clean one-sample z-1) plus a recordhead write.
+  if (name === 'hold') {
+    const raw = items.slice(1);
+    const pos = [];
+    const kw = Object.create(null);
+    for (let i = 0; i < raw.length; i++) {
+      const it = raw[i];
+      if (it && it.t === 'kw') {
+        if (it.s === 'per-sample') kw['per-sample'] = true;
+        else { kw[it.s] = raw[i + 1]; i++; }
+      } else pos.push(it);
     }
-    return { t: 'num', v: 0 };
+    const hasClock = kw.trig !== undefined || kw['per-sample'];
+    if (!hasClock) {
+      // Level sample & hold: track the value while the gate is high.
+      const gate = pos.length >= 2 ? pos[1] : kw.on;
+      if (!gate) throw new Error('hold: level S&H needs a gate, e.g. (hold v g) or (hold v :on g)');
+      return { t: 'call', op: 'hold',
+        args: [expandNode(pos[0], env, ctx), expandNode(gate, env, ctx)],
+        kwargs: Object.create(null) };
+    }
+    const initNode = kw.init !== undefined ? expandNode(kw.init, env, ctx) : null;
+    const initVal = initNode && initNode.t === 'num' ? initNode.v : 0;
+    const cellNode = { t: 'tape', items: [{ t: 'num', v: initVal }] };
+    const readNode = { t: 'call', op: 'lookup', args: [cellNode, { t: 'num', v: 0 }], kwargs: Object.create(null) };
+    let valueNode;
+    if (pos.length >= 2) {
+      // (hold NAME NEXT ...): bind NAME to the held value, then expand NEXT.
+      if (pos[0].t !== 'sym') throw new Error('hold: register form needs a name first, e.g. (hold count (add count 1) :trig clk)');
+      const childEnv = makeEnv(env);
+      envBind(childEnv, pos[0].s, readNode);
+      valueNode = expandNode(pos[1], childEnv, ctx);
+    } else {
+      valueNode = expandNode(pos[0], env, ctx);   // sample an external value, no feedback
+    }
+    const cableKwargs = Object.create(null);
+    if (kw.trig !== undefined) cableKwargs.trig = expandNode(kw.trig, env, ctx);
+    else cableKwargs['per-sample'] = { t: 'flag' };
+    ctx.localCables.push({ sink: cellNode, value: valueNode, kwargs: cableKwargs });
+    return readNode;
   }
 
   if (name === 'outputs') {
@@ -556,8 +626,17 @@ function expandNode(node, env, ctx) {
     return buildThru(listResolved, atArg);
   }
 
-  // def / <- are handled by body processors but can appear as raw nodes in fn bodies.
-  if (name === 'def' || name === '<-') return node;
+  // def is handled by body processors but can appear as a raw node in fn bodies.
+  if (name === 'def') return node;
+
+  // <- is a statement, not a value: it defines an output on its own line. Nested
+  // in an expression the write was silently dropped, so reject it and point at
+  // the idiom: name the signal with def, then write it.
+  if (name === '<-') {
+    throw new Error(
+      '<- cannot be nested inside an expression; it writes a destination on its own line. ' +
+      'Name the signal with def and reference it, e.g. (def x SRC) then (<- DEST x).');
+  }
 
   // --- function call or unknown op ---
 
@@ -571,12 +650,6 @@ function expandNode(node, env, ctx) {
         // Primitive op (defined in prelude but implemented in runtime): emit call node.
         const rawArgs = items.slice(1).map(it => expandNode(it, env, ctx));
         const { positional, kwargs } = splitArgs(rawArgs);
-        // Ops that accept :trig default to master when :trig is absent.
-        // SPEC: skip injection when an alternative rate kwarg (:hz, :bpm) is present.
-        const CLK_OPS = new Set(['trig', 'step', 'seek', 'turns', 'every', 'random', 'chance', 'walk',
-          'euclid', 'hits', 'gates', 'onsets', 'groove',
-          'recordhead-per-cell', 'recordhead-gated',
-          'recordhead-len-capped', 'recordhead-len-capped-gated']);
         if (CLK_OPS.has(name) && !kwargs.trig && !kwargs.hz && !kwargs.bpm) {
           const masterR = envLookup(env, 'master');
           if (masterR.found) kwargs.trig = masterR.value;
@@ -639,6 +712,15 @@ function expandNode(node, env, ctx) {
       return expandPortSelect(fnNode, items.slice(1), env, ctx);
     }
 
+    // A tape/audio buffer applied to an index reads that cell: (t i) -> (lookup t i).
+    // A tape is a function of its index; this is the legible form of (lookup t i).
+    if (fnNode && (fnNode.t === 'tape' || fnNode.t === 'audio') && items.length > 1) {
+      const argItems = items.slice(1).map(it => it.t === 'kw' ? it : expandNode(it, env, ctx));
+      const { positional, kwargs } = splitArgs(argItems);
+      if (positional.length >= 1)
+        return { t: 'call', op: 'lookup', args: [fnNode, positional[0]], kwargs };
+    }
+
     // The resolved value is some other node (tape, lens, num, etc.) used as
     // a positional -- caller is doing something like (step rungle) where rungle
     // is a tape node. We resolve the name; the surrounding call handles the node.
@@ -692,6 +774,26 @@ function expandFnCall(opName, fnNode, argItems, callEnv, ctx) {
 }
 
 // Expand a fn body with named output ports.
+// (on CLK [:when G] FORM...): a timing region. Contained (<- ...) writes default to
+// :trig CLK and :when G; contained defs bind normally. Returns the cables so each
+// caller (patch body / fn body) files them where it keeps cables.
+function expandOnRegion(form, env, ctx) {
+  const inner = form.items.slice(1);
+  const ambient = { trig: expandNode(inner[0], env, ctx), when: null };
+  const cables = [];
+  for (let i = 1; i < inner.length; i++) {
+    const it = inner[i];
+    if (it && it.t === 'kw') {
+      if (it.s === 'when') { ambient.when = expandNode(inner[i + 1], env, ctx); i++; }
+    } else if (it && it.t === 'list') {
+      const h = it.items[0] && it.items[0].t === 'sym' ? it.items[0].s : null;
+      if (h === 'def') bindDef(it, env, ctx);
+      else if (h === '<-') cables.push(expandCableForm(it, env, ctx, ambient));
+    }
+  }
+  return cables;
+}
+
 function expandFnBodyMulti(bodyForms, env, outputNames, ctx) {
   const localEnv = makeEnv(env);
   const ports = [];
@@ -714,6 +816,10 @@ function expandFnBodyMulti(bodyForms, env, outputNames, ctx) {
           // bindings do not (the value flows through the returned port).
           ctx.localCables.push(cable);
         }
+        continue;
+      }
+      if (h === 'on') {
+        for (const c of expandOnRegion(form, localEnv, ctx)) ctx.localCables.push(c);
         continue;
       }
     }
@@ -743,6 +849,10 @@ function expandFnBodySingle(bodyForms, env, ctx) {
         ctx.localCables.push(cable);
         continue;
       }
+      if (h === 'on') {
+        for (const c of expandOnRegion(form, localEnv, ctx)) ctx.localCables.push(c);
+        continue;
+      }
     }
     last = expandNode(form, localEnv, ctx);
   }
@@ -755,17 +865,31 @@ function expandCableInBody(form, env, ctx) {
   return expandCableForm(form, env, ctx);
 }
 
-function expandCableForm(form, env, ctx) {
+function expandCableForm(form, env, ctx, ambient) {
   const items = form.items; // [<-, SINK, args...]
   const sinkNode = items[1];
 
-  // Expand args (skip the raw kw tokens -- they expand to themselves).
-  const expanded = items.slice(2).map(it => {
-    if (it.t === 'kw') return it;
-    return expandNode(it, env, ctx);
-  });
+  // Split cable args into stage forms (positional) and cable-level kwargs.
+  // Positional stages thread right-to-left into one nested signal form, which
+  // then expands through the normal path; a single stage passes through.
+  const rawSplit = splitArgs(items.slice(2));
+  let valueForm;
+  if (rawSplit.positional.length === 0)      valueForm = { t: 'num', v: 0 };
+  else if (rawSplit.positional.length === 1) valueForm = rawSplit.positional[0];
+  else                                       valueForm = threadStages(rawSplit.positional);
+  const value = expandNode(valueForm, env, ctx);
 
-  const { positional, kwargs } = splitArgs(expanded);
+  const kwargs = Object.create(null);
+  for (const [k, v] of Object.entries(rawSplit.kwargs)) {
+    kwargs[k] = (v && v.t === 'flag') ? v : expandNode(v, env, ctx);
+  }
+
+  // A timing region (on CLK :when G ...) supplies default :trig / :when to its
+  // writes; an explicit kwarg on the cable still wins.
+  if (ambient) {
+    if (ambient.trig && !kwargs.trig) kwargs.trig = ambient.trig;
+    if (ambient.when && !kwargs.when) kwargs.when = ambient.when;
+  }
 
   // Output jacks: (<- (cv-out :1) X). The sink list head is an output-jack
   // family; carry it through as a structured jacksink for the lowerer to
@@ -790,27 +914,44 @@ function expandCableForm(form, env, ctx) {
     // Resolve sink: try env lookup; if not found it is a hardware sink sym.
     const r = envLookup(env, sinkNode.s);
     sink = r.found ? r.value : sinkNode;
+  } else if (sinkNode && sinkNode.t === 'list' && sinkNode.items[0]
+             && sinkNode.items[0].t === 'sym' && sinkNode.items[0].s === 'seek') {
+    // Seek-write sink: (<- (seek TAPE IDX) VAL). Expand the args structurally but
+    // do NOT distribute seek as a read over a tape bank -- a bank tape arg stays a
+    // buflens-sel so the lowerer's emitSeekWrite fans the WRITE across the bank.
+    const seekItems = sinkNode.items.slice(1).map(it => it.t === 'kw' ? it : expandNode(it, env, ctx));
+    const split = splitArgs(seekItems);
+    sink = { t: 'call', op: 'seek', args: split.positional, kwargs: split.kwargs };
+  } else if (sinkNode && sinkNode.t === 'list' && sinkNode.items[0]
+             && sinkNode.items[0].t === 'sym'
+             && (() => { const r = envLookup(env, sinkNode.items[0].s);
+                         return r.found && r.value && (r.value.t === 'tape' || r.value.t === 'audio'); })()) {
+    // Indexed-tape write sink: (<- (TAPE IDX) VAL) == (<- (seek TAPE IDX) VAL).
+    // A tape is a function of its index; writing the application writes that cell.
+    const bufNode = envLookup(env, sinkNode.items[0].s).value;
+    const idxItems = sinkNode.items.slice(1).map(it => it.t === 'kw' ? it : expandNode(it, env, ctx));
+    const split = splitArgs(idxItems);
+    sink = { t: 'call', op: 'seek', args: [bufNode, ...split.positional], kwargs: split.kwargs };
+  } else if (sinkNode && sinkNode.t === 'list' && sinkNode.items[0]
+             && sinkNode.items[0].t === 'sym'
+             && (sinkNode.items[0].s === 'midi-note-out'
+                 || sinkNode.items[0].s === 'midi-cc-out'
+                 || sinkNode.items[0].s === 'midi-clock-out')) {
+    // MIDI output sinks: (<- (midi-note-out :ch N) pitch :gate g :vel v) etc.
+    // Pass kwargs through as-is (they are channel/cc params, not value streams).
+    const op = sinkNode.items[0].s;
+    const rest = sinkNode.items.slice(1);
+    const split = splitArgs(rest.map(it => it.t === 'kw' ? it : expandNode(it, env, ctx)));
+    sink = { t: 'call', op, args: split.positional, kwargs: split.kwargs };
   } else if (sinkNode) {
     sink = expandNode(sinkNode, env, ctx);
   } else {
     sink = { t: 'sym', s: '?' };
   }
 
-  let value;
-  if (positional.length === 1) {
-    value = positional[0];
-  } else if (positional.length > 1) {
-    // Multi-positional cable: (<- buf (vcf :cut ...) (add ...) :per-sample)
-    // The first positional is a filter/processing chain; the second is the source.
-    // Model as a chain node.
-    value = { t: 'chain', stages: positional };
-  } else {
-    value = { t: 'num', v: 0 };
-  }
-
   // Auto-inject :trig master when sink is a buffer (tape/audio/lens) and no rate kwarg is present.
   // Audio delay buffers (t === 'audio') default to per-sample writes; tape/lens use the master clock.
-  // Mirrors CLK_OPS injection for primitive calls (expander.js line 480).
+  // Mirrors the CLK_OPS :trig injection for primitive calls.
   const sinkIsBuf = sink.t === 'tape' || sink.t === 'audio' || sink.t === 'lens';
   if (sinkIsBuf && !kwargs.trig && !kwargs.hz && !kwargs.bpm && !('per-sample' in kwargs)) {
     if (sink.t === 'audio') {
@@ -891,10 +1032,12 @@ function expand(astForms, { loadFile }) {
       continue;
     }
 
-    if (head === 'patch' || head === 'computer-patch' || head === 'vst-patch' || head === 'midi-patch') {
+    if (head === 'patch') {
       expandPatchBody(form.items.slice(1), patchEnv, report, ctx);
       continue;
     }
+
+    throw new Error(`unknown top-level form (${head} ...); a file holds use/def forms and one (patch ...)`);
   }
 
   // Flush cables emitted inside fn bodies (buffer writes, etc.) into the main
@@ -923,6 +1066,18 @@ function expandPatchBody(bodyForms, env, report, ctx) {
       const sinkName = cable.sink && cable.sink.t === 'sym' ? cable.sink.s : null;
       if (sinkName) claimedSinks.add(sinkName);
       report.cables.push(cable);
+      continue;
+    }
+
+    // (on CLK [:when G] FORM...): a timing region. Contained writes default to
+    // :trig CLK and :when G; contained defs bind normally. Factors the repeated
+    // clock/gate off each line and makes when things happen explicit.
+    if (head === 'on') {
+      for (const cable of expandOnRegion(form, localEnv, ctx)) {
+        const sinkName = cable.sink && cable.sink.t === 'sym' ? cable.sink.s : null;
+        if (sinkName) claimedSinks.add(sinkName);
+        report.cables.push(cable);
+      }
       continue;
     }
   }

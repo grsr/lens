@@ -19,7 +19,7 @@ const KNOWN_INTERNAL = new Set([
   'op_terminal_write_led_3', 'op_terminal_write_led_4', 'op_terminal_write_led_5',
   // recordhead variants
   'op_recordhead_per_sample', 'op_recordhead_per_cell', 'op_recordhead_gated',
-  'op_recordhead_len_capped', 'op_recordhead_len_capped_gated',
+  'op_recordhead_len_capped', 'op_recordhead_len_capped_gated', 'op_recordhead_seek',
   // wave variants
   'op_wave', 'op_wave_drumrack',
   // variadic-collapsed binary ops
@@ -28,6 +28,10 @@ const KNOWN_INTERNAL = new Set([
   'op_add_sat', 'op_sub_sat',
   // structural / synthetic
   'op_connected', 'op_stub', 'op_morph',
+  // MIDI leaf (midi_scratch reader; parallel to op_knob for hw_scratch)
+  'op_midi',
+  // MIDI output sinks (side-effecting roots, no terminal entry)
+  'op_midi_note_out', 'op_midi_cc_out', 'op_midi_clock_out',
 ]);
 
 // Collect names of primitive fns in prelude: (def NAME (fn (...) <meta-only body>)).
@@ -76,11 +80,14 @@ const EXPANDER_SUGAR = new Set(['groove', 'tape', 'audio', 'score', 'normal']);
 
 // Prelude primitives that lower to a kernel with a different name.
 // trig (a clock's beat) lowers to op_fall (the ramp's wrap); edge is the rising kernel.
-const KERNEL_OVERRIDE = { trig: 'op_fall' };
+const KERNEL_OVERRIDE = { trig: 'op_fall', lpf2: 'op_svf', hpf2: 'op_svf', bpf2: 'op_svf',
+                          wt: 'op_wavetable' };
 
 // Convert a prelude name like 'v-oct' -> 'op_v_oct'.
 function primToKernel(name) {
   if (KERNEL_OVERRIDE[name]) return KERNEL_OVERRIDE[name];
+  // MIDI leaf verbs (midi-note/gate/cc/trig/...) all read midi_scratch via op_midi.
+  if (name.startsWith('midi-')) return 'op_midi';
   return 'op_' + name.replace(/-/g, '_');
 }
 

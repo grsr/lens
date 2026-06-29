@@ -1,0 +1,63 @@
+; Benjolin / rungler brain for the WORKSHOP oscillators (cross-FM done in analog).
+; The Computer reads both oscillators, runs the comparator + shift-register rungle,
+; and sends CV back to re-tune them. Osc 2 is the rungle clock and is itself re-tuned
+; by the rungle (the tail-chasing trick); knob-x sets how hard, sliding from a clean
+; stepped sequence into self-modulating chaos. Two decorrelated rungle voltages drive
+; the left and right filters, so the stereo image moves on its own.
+;   knob-main = rungle depth   (how far the stepped voltage re-tunes the voice osc 1)
+;   knob-x    = chaos          (how hard the rungle re-tunes the clock osc 2: 0 = steady)
+;   knob-y    = sweep          (shifts both oscillator pitches together)
+;   switch up = freeze         (lock the rungle pattern into a repeating loop)
+;   cv-in 1   = external sweep  (sums with knob-y, to sequence the pitches)
+;   pulse-in 1 = external clock (overrides osc 2 as the rungle clock when patched)
+; patch it up (osc 2 = the slower one):
+;   osc 1 out -> audio-in 1     osc 2 out -> audio-in 2
+;   cv-out 1 -> osc 1 pitch CV  cv-out 2 -> osc 2 pitch CV
+;   audio-out 1 -> LEFT filter cutoff   audio-out 2 -> RIGHT filter cutoff
+;   osc 1 -> left mixer channel, osc 2 -> right mixer channel (pan hard for width)
+;   pulse-out 1 = rungle clock   pulse-out 2 = rungle gate (trigger envelopes)
+(patch
+  (def o1 (audio-in :1))                          ; analog oscillator 1 (voice + data)
+  (def o2 (audio-in :2))                          ; analog oscillator 2 (clock)
+
+  ; comparators. osc 2 clocks the register; an external clock overrides it when patched.
+  (def c1  (mask (gt o1 0) 1))                    ; osc 1 sign bit = rungle data
+  (def clk (normal (pulse-in :1) (schmitt o2 :lo -100 :hi 100)))
+
+  ; freeze: switch up locks the 8-bit pattern into a loop
+  (def lock (mask (gt (switch :z) VMID) 1))
+  (def run  (sub 1 lock))
+
+  ; nonlinear feedback shift register. running: data = osc 1 XOR the oldest stage.
+  ; locked: pure recirculation, so the bits just cycle.
+  (def reg (tape '(0 1 1 0 1 0 0 1)))
+  (def din (xor (tap reg :amount 8) (mul run c1)))
+  (<- reg din :trig clk)
+
+  ; two rungle DACs from different stages, so the two filters sweep out of step:
+  ;   A = the three newest stages   B = the next three (a 3-step canon behind A)
+  (def runA (div (mul (add (add (mul (tap reg :amount 1) 4) (mul (tap reg :amount 2) 2)) (tap reg :amount 3)) VMAX) 7))
+  (def runB (div (mul (add (add (mul (tap reg :amount 4) 4) (mul (tap reg :amount 5) 2)) (tap reg :amount 6)) VMAX) 7))
+  (def levelA (add (add (mul (tap reg :amount 1) 4) (mul (tap reg :amount 2) 2)) (tap reg :amount 3)))  ; 0..7 for pitch
+
+  ; pitch CV: shared sweep + the rungle. the clock osc only gets the rungle scaled by
+  ; chaos, so knob-x slides from a steady clock (clean sequence) to a self-modulating one.
+  (def sweep  (add (div (sub (knob :y) VMID) 2) (cv-in :1 :bipolar)))   ; knob + external
+  (def depth  (spread (knob :main) 290))                                ; rungle depth per level (up to ~full CV range)
+  (def voiceFM (mul levelA depth))                                      ; rungle -> osc 1
+  (def clockFM (div (mul voiceFM (knob :x)) VMAX))                      ; rungle -> osc 2 (chaos)
+
+  (<- (cv-out :1)    (add sweep voiceFM))         ; -> osc 1 pitch
+  (<- (cv-out :2)    (add sweep clockFM))         ; -> osc 2 pitch
+  (<- (audio-out :1) (sub runA VMID))             ; rungle A -> LEFT filter cutoff
+  (<- (audio-out :2) (sub runB VMID))             ; rungle B -> RIGHT filter cutoff
+  (<- (pulse-out :1) clk)                         ; rungle clock
+  (<- (pulse-out :2) (gt runB VMID))              ; slower rungle gate
+
+  ; LEDs: the three newest register bits, then the two rungle levels, then freeze
+  (<- (led :0) (mul (tap reg :amount 1) VMAX))
+  (<- (led :1) (mul (tap reg :amount 2) VMAX))
+  (<- (led :2) (mul (tap reg :amount 3) VMAX))
+  (<- (led :3) runA)
+  (<- (led :4) runB)
+  (<- (led :5) (mul lock VMAX)))

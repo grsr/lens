@@ -1,5 +1,6 @@
 build/
 build32/
+build-*/
 *.pass1-broken-backup
 .DS_Store
 .vscode/
@@ -15,12 +16,18 @@ node_modules/
 
 # the dumping ground: anything here stays local and never ships
 attic/
-lens_run
 lens_sim_events.csv
-*.wav
 lens_raw.txt
 
 # compiled host sim binary (dev only)
 runtime/test/host_runner
 
-.claude/settings.json
+# copyrighted DX7 voice data -- never commit (source .syx and generated header)
+banks/
+runtime/dx7banks.h
+
+# Claude Code local settings, worktrees, and scratch
+.claude/
+scratchpad/
+patches/*.loupe.bin
+patches/*.loupe.json

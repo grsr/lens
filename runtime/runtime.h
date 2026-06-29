@@ -15,12 +15,19 @@ struct Buffer {
 };
 
 /* ---- Static pool sizes ---- */
-/* SPEC: kBufferBytes=128KB (audio torus); kControlBytes=1024 (sequence tapes).
-   12-bit packed: (n*3+1)>>1 bytes per n cells; 128KB = 87381 cells = 1.82s @ 48kHz. */
-#define LENS_AUDIO_BUFFER_BYTES   (128 * 1024)
+#ifndef LENS_PERF_PROBE
+#define LENS_PERF_PROBE 0
+#endif
+/* 128 KB torus (release) or 64 KB with perf profiler compiled in. */
+#if LENS_PERF_PROBE
+#define LENS_AUDIO_BUFFER_BYTES (64 * 1024)
+#else
+#define LENS_AUDIO_BUFFER_BYTES (128 * 1024)
+#endif
 #define LENS_CONTROL_BUFFER_BYTES (1024)
 #define LENS_MAX_SLOTS            256
-#define LENS_NODESTATE_BYTES      (4 * 1024)
+#define LENS_NODESTATE_BYTES      (4 * 1024)  /* op_wavetable state is ~1 KB/instance -> a
+                                                 few voices fit; bump to 8K for more */
 #define LENS_MAX_BUFFERS          16
 #define LENS_MAX_TERMINALS        16
 #define LENS_CONST_POOL_WORDS     64
@@ -98,7 +105,7 @@ struct LensRuntime {
     uint8_t                 has_recordhead;
 
     /*
-     * sample_counter: incremented by Core 0 at end of runtime_step_core0.
+     * sample_counter: incremented by Core 0 at the end of each sample walk.
      * Core 1 spin-polls this; must be volatile so the compiler does not
      * cache the value across spin-poll iterations.
      */
@@ -111,7 +118,8 @@ struct LensRuntime {
 
     /*
      * core1_done: set by Core 1 to the sequence number after each
-     * runtime_walk_core1; Core 0 spins until it matches before committing.
+     * runtime_walk_core1. Core 0 never waits on it (the audio path is
+     * non-blocking); only the perf/status journal reads it.
      */
     volatile uint32_t       core1_done;
 
@@ -122,20 +130,12 @@ struct LensRuntime {
      * one-sample lag instead of an order-dependent race. Built by snapshot_apply.
      */
     int32_t*                xcore_src[LENS_MAX_SLOTS];
+    uint8_t                 xcore_core[LENS_MAX_SLOTS];  /* producer core per shadow: each core publishes only its own */
     uint16_t                xcore_count;
 
-    /*
-     * dual_active: set at apply time to (core1 has any slot). When
-     * false the compiler put every slot on Core 0, so the audio ISR skips the
-     * FIFO doorbell ring + bounded spin + shadow publish and runs the cheaper
-     * single-core path. Race-freedom is preserved: a single core has no
-     * cross-core reads to order.
-     */
-    uint8_t                 dual_active;
-
 #if LENS_PERF_PROBE
-    /* Per-slot cycle accumulators. Cleared at apply time; updated by
-     * runtime_step_core0 around each kernel call.
+    /* Per-slot cycle accumulators. Cleared at apply time; updated around each
+     * kernel call (step_slot).
      * slot_cycle_total[i]: running sum of DWT cycles for slot i.
      * slot_cycle_max[i]:   peak single-call cycle count for slot i.
      * slot_call_count[i]:  number of times slot i has been invoked. */
@@ -149,6 +149,9 @@ struct LensRuntime {
 extern uint8_t              lens_audio_pool[LENS_AUDIO_BUFFER_BYTES];
 extern uint8_t              lens_control_pool[LENS_CONTROL_BUFFER_BYTES];
 extern uint8_t              lens_nodestate_pool[LENS_NODESTATE_BYTES];
+/* Live used bytes of the node-state / control pools (settings-save overlay). */
+size_t lens_nodestate_used(void);
+size_t lens_control_used(void);
 extern struct Slot          lens_slot_pool[LENS_MAX_SLOTS];
 extern struct Buffer        lens_buffer_pool[LENS_MAX_BUFFERS];
 extern struct RuntimeTerminal lens_terminal_pool[LENS_MAX_TERMINALS];
@@ -174,38 +177,26 @@ void runtime_update_hw_scratch(const struct HardwareInputs* hw);
 /* Parse snapshot bytes, wire a static LensRuntime. Returns 0 on success. */
 int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len);
 
-/* Advance runtime one sample (single-core: all slots on Core 0). */
+/* Advance one sample on a single thread: walk every slot in order, then publish
+ * cross-core shadows. Models any snapshot (single- or dual-core) for the host
+ * sim; the hardware audio path uses runtime_walk_core0/1 instead. */
 void runtime_step(struct LensRuntime* rt,
                   const struct HardwareInputs* hw,
                   struct HardwareOutputs* hw_out);
 
-/* Reference scheduler (single-core): minimal model, every slot every sample in
- * walk order. The oracle the optimized walk is diffed against. */
+/* Reference walk: minimal model, every slot every sample in walk order, shadows
+ * published at the boundary. The oracle the optimized walk is diffed against. */
 void runtime_step_reference(struct LensRuntime* rt,
                             const struct HardwareInputs* hw,
                             struct HardwareOutputs* hw_out);
 
 /*
- * runtime_step_core0: single-core step. Called from the audio ISR on Core 0.
- * Updates hw_scratch, walks both cores' slots in place (Core 1's only when
- * not built for dual-core), sweeps recordheads, publishes shadows, drives
- * terminals, increments sample_counter.
- *
- * A cross-core read sees the producer's previous-sample shadow (a deterministic
- * one-sample lag; wired by snapshot_apply). Single-writer is guaranteed by the
- * scheduler; STR on M0+ is atomic at word granularity, so no torn reads occur.
- */
-void runtime_step_core0(struct LensRuntime* rt,
-                        const struct HardwareInputs* hw,
-                        struct HardwareOutputs* hw_out);
-
-/*
- * Dual-core walk primitives: the orchestrator (main.cpp) calls these around the
- * doorbell barrier. Each walks its core's flat slot list with the same
- * change-gating as runtime_step; seq is unused (kept for the call signature).
- * Core 1 sets core1_done = seq when finished; Core 0 spins until it matches,
- * then sweeps recordheads once and drives terminals. Each slot writes its output
- * directly during the walk, so no separate commit pass is needed.
+ * Dual-core walk primitives: the orchestrator (main.cpp) calls these on each
+ * core. Each walks its core's flat slot list; seq is unused (kept for the call
+ * signature). Each core then sweeps its own recordheads and publishes its own
+ * shadows; Core 0 drives terminals and never waits on Core 1 (a late Core 1 just
+ * holds last sample's shadow). Each slot writes its output directly during the
+ * walk, so no separate commit pass is needed.
  */
 void runtime_walk_core0(struct LensRuntime* rt, uint32_t seq);
 void runtime_walk_core1(struct LensRuntime* rt, uint32_t seq);
@@ -214,6 +205,14 @@ void runtime_walk_core1(struct LensRuntime* rt, uint32_t seq);
  * both cores' walks complete and before runtime_drive_terminals so the
  * driven values reflect the freshest committed tape state. */
 void recordhead_sweep(struct LensRuntime* rt);
+
+/* Per-core sweep/publish: each core commits its own recordheads and publishes
+ * only the shadows it produces, so the two cores never touch each other's state
+ * and Core 0 need not wait for Core 1 (the non-blocking dual path). */
+void recordhead_sweep_core0(struct LensRuntime* rt);
+void recordhead_sweep_core1(struct LensRuntime* rt);
+void runtime_publish_shadows_core0(struct LensRuntime* rt);
+void runtime_publish_shadows_core1(struct LensRuntime* rt);
 
 /* Copy each cross-core producer's value into its shadow. Run at the sample
  * boundary AFTER both cores' walks and recordhead_sweep, BEFORE drive_terminals. */
@@ -231,8 +230,65 @@ uint8_t runtime_find_kernel(const char* name);
 /* Returns non-zero if kid is a hardware-leaf kernel (needs hw-jack routing). */
 int runtime_is_hw_leaf(uint8_t kid);
 
+/* Returns non-zero if kid is a MIDI-leaf kernel (needs midi-scratch routing). */
+int runtime_is_midi_leaf(uint8_t kid);
+
 /* Wire s->fn from KFN[s->kernel_id]; called once per slot at apply time. */
 void runtime_slot_wire_fn(struct Slot* s);
 
 /* Return the NodeState byte size for the given kernel id. */
 uint32_t runtime_kernel_state_bytes(uint8_t kid);
+
+/* DX7 log-domain 4-rate/4-level envelope state (shared between op_dxeg and op_dx). */
+struct DxEgState {
+    int32_t value;
+    int32_t level_, targetlevel_, inc_, ix_, rising_, down_, last_gate, inited;
+    int32_t rate_scaling_;   /* per-note qrate offset (msfa ScaleRate); 0 = none */
+    int32_t staticcount_;    /* samples left to hold a flat segment (msfa ACCURATE_ENVELOPE) */
+};
+
+/* Faithful port of msfa PitchEnv (pitchenv.cc): the DX7 pitch envelope, swept in
+   the logfreq (Q24) domain and added to ratio operators' frequency. The kick's
+   "thud" is this envelope sweeping the carriers down at note onset. */
+struct PitchEnvState {
+    int32_t rates_[4], levels_[4];   /* raw DX7 PEG rates/levels (0..99) */
+    int32_t level_, targetlevel_, inc_, ix_, rising_, down_;
+    int32_t last_gate, inited;
+};
+
+/* op_dx voice state: 6 oscillators, each with phase, feedback history, and DX EG. */
+struct FmState {
+    int32_t  value;
+    uint32_t phase[6];
+    int32_t  y0[6], y1[6];
+    struct DxEgState eg[6];
+    int32_t  rate_scaling[6];  /* per-op DX7 rate-scaling delta (ScaleRate), note-on computed */
+    int32_t  ks_mult[6];       /* per-op keyboard-scaling gain multiplier (Q16) */
+    int32_t  ks_pitch;         /* note ks_mult was computed for (-1 = uncomputed) */
+    /* flash-bank cache: parsed on (bank,preset) change. cells_valid=0 until first parse. */
+    int32_t  cells[56];
+    int32_t  cached_bank;
+    int32_t  cached_preset;
+    int32_t  cells_valid;
+    /* msfa-faithful frequency derivation (FLASH mode): per-op logfreq base (Q24,
+       note-independent: coarse+fine for ratio ops, the full fixed logfreq for
+       fixed ops) + a ratio mask (bit op set => add the played note + pitch env). */
+    int32_t  logfreq[6];
+    int32_t  op_ratio;         /* bit i set: op i is a ratio op (note + pitch env apply) */
+    struct PitchEnvState peg;  /* global pitch envelope (DX7 bytes 102..109) */
+};
+
+/* op_dx frequency-cell encoding. A ratio operator's cell holds (semitone offset + 64),
+   always well under FM_FIXED_FLAG. A fixed-frequency operator's cell holds its absolute
+   note in 1/12-semitone units + FM_FIXED_BIAS (sub-semitone, so FM sidebands beat at the
+   right rate); the kernel detects fixed ops by cell >= FM_FIXED_FLAG. Note -36..123 in
+   twelfths = -432..1476, + bias 2480 = 2048..3956 (fits 12 bits, all >= the flag). */
+#define FM_FIXED_FLAG 2048
+#define FM_FIXED_BIAS 2480
+
+/* Parse one DX7 voice (128 raw bytes) into 56 op_dx cells. Mirrors dx7import.voiceCells. */
+void dx7_parse_voice(const uint8_t* v128, int32_t cells[56]);
+
+/* Fused DX7 voice kernel from a flash bank (param0=bank):
+   in0=decay, in1=pitch, in2=gate, in3=preset, in4=tone. */
+void op_dx(struct Slot* s);

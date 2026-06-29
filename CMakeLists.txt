@@ -59,6 +59,7 @@ add_executable(lens
     ${CMAKE_CURRENT_LIST_DIR}/runtime/main.cpp
     ${CMAKE_CURRENT_LIST_DIR}/runtime/sysex.cpp
     ${CMAKE_CURRENT_LIST_DIR}/runtime/runtime.c
+    ${CMAKE_CURRENT_LIST_DIR}/runtime/midi.c
     ${CMAKE_CURRENT_LIST_DIR}/runtime/snapshot_apply.c
     ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
     ${FACTORY_H}
@@ -87,6 +88,15 @@ target_link_libraries(lens
     tinyusb_board
 )
 
+# ---- USB: host + device stacks; role chosen at boot from the USB-C CC pins
+# (keyboard plugged in -> host, computer -> device). ----
+target_sources(lens PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/runtime/usb_host/usb_midi_host.c
+    ${CMAKE_CURRENT_LIST_DIR}/runtime/usb_host/usb_midi_host_app_driver.c
+)
+target_include_directories(lens PUBLIC ${CMAKE_CURRENT_LIST_DIR}/runtime/usb_host)
+target_link_libraries(lens tinyusb_host)
+
 # Warn on double-promotion; block on wall/extra.
 target_compile_options(lens PRIVATE
     -Wall -Wextra -Wdouble-promotion -Wfloat-conversion
@@ -110,12 +120,10 @@ target_link_options(lens PRIVATE -Wl,--print-memory-usage)
 # XOSC startup delay guard (from root CMakeLists.txt).
 target_compile_definitions(lens PRIVATE PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64)
 
-# Perf probe: per-sample cycle ring + per-slot slot_perf counters.
-# Disable by passing -DLENS_PERF_PROBE=0 at cmake configure time.
-if(NOT DEFINED LENS_PERF_PROBE)
-    set(LENS_PERF_PROBE 1)
-endif()
-target_compile_definitions(lens PRIVATE LENS_PERF_PROBE=${LENS_PERF_PROBE})
+# Perf probe: per-sample cycle ring + per-slot counters. Default OFF (release).
+# Enable with: cmake -B build -DLENS_PERF_PROBE=ON
+option(LENS_PERF_PROBE "Compile in perf profiler; reduces audio torus to 64 KB" OFF)
+target_compile_definitions(lens PRIVATE LENS_PERF_PROBE=$<BOOL:${LENS_PERF_PROBE}>)
 message(STATUS "lens LENS_PERF_PROBE: ${LENS_PERF_PROBE}")
 
 # The full card is always built (dual-core + USB + apply); no stage gates.

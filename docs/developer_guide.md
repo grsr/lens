@@ -16,7 +16,7 @@ web/        the web editor (the primary user interface)
 tools/      build helpers and lookup-table generators
 patches/    example patches
 docs/       this documentation
-attic/      prototype, shelved notes, and golden fixtures (gitignored)
+attic/      prototype, shelved notes, and gate scripts (gitignored)
 prelude.loupe   the standard library, loaded before every patch
 CMakeLists.txt, pico_sdk_import.cmake, LICENSE, package.json, ComputerCard.h
 ```
@@ -58,6 +58,43 @@ kwargs and a docstring. A patch can shadow any prelude binding.
 `audio`, `lens`, `score`, `normal`, and the sugar forms. It returns a flat list
 of slot records with resolved inputs. Op-lens calls (`(thru ops idx)` applied to
 an argument) are inlined here, so the later stages never see a half-applied lens.
+
+### The `<-` cable chain (`threadStages`)
+
+A cable `(<- DEST a b c)` writes one signal to a destination. The signal can be
+written as one nested expression or as a flat chain, and the two compile to the
+same graph. The expander chooses by counting the **top-level forms** under `<-`
+(`splitArgs` separates positional stages from cable-level kwargs):
+
+- `0` positionals: the value is `0`.
+- `1` positional: it is the value, used verbatim. A hand-nested expression like
+  `(<- out (vca (lpf (sine p) :cut 1500) env))` is a single form, so it takes
+  this path and nothing is rewritten.
+- `2+` positionals: `threadStages` folds them right-to-left into the nested form.
+  The rightmost stage is the source; each stage to its left receives the running
+  signal as its **first** argument.
+
+Two properties keep the chain form and the nested form from interfering:
+
+1. Threading only runs with 2+ top-level forms, so an explicit nest (one form)
+   never enters it.
+2. Threading is shallow. For each stage it inserts the signal between the head
+   and the rest (`[head, signal, ...stage.slice(1)]`); it never recurses into the
+   sub-expressions a stage already contains. So `env`, `:cut 1500`, and the
+   source's own arguments are copied through untouched.
+
+The thread always lands the signal in a stage's first input, which is why Loupe's
+convention is that a function's first parameter is its signal input. A chain stage
+must omit the input it is threading; writing it explicitly (e.g. `(lpf :in x ...)`
+mid-chain) supplies that input twice. The output of this is plain nested
+application, so the lowerer has no chain concept.
+
+`<-` is a statement, handled by the body processors (patch body, `fn` body, `on`
+region); it only ever defines a destination on its own line. It is not a value,
+so it cannot be nested inside an expression. `expandNode` rejects a nested `<-`
+with an error rather than dropping the write (which it did silently before). To
+write a signal somewhere and keep using it, name it with `def` and write it from
+separate lines.
 
 **Lowerer** turns the expanded graph into slots, selecting the concrete kernel
 name for each node from its argument pattern (for example, a record-head cable
@@ -119,7 +156,8 @@ without mutexes, on one core or two.
 The kernel bodies all live in `runtime/runtime.c` as `op_*` functions, each
 marked for RAM placement so it stays off the flash bus on the audio path. They
 cover arithmetic and logic, oscillators and edge detectors, filters and
-dynamics, envelopes, the drum voices, and the tape and record-head ops. The
+dynamics, envelopes, the drum voices (`kick`, `snare`, `hat`), and the tape and
+record-head ops. The
 name-to-id table (`KTABLE`) and the function-pointer table (`KFN`) are in the
 same file; `snapshot_apply.c` looks names up through `runtime_find_kernel`.
 
@@ -158,9 +196,11 @@ core 0, so the card runs core 0 only and deterministic, with the core-1 doorbell
 path live and ready for heavier patches once cost calibration moves work onto it.
 On-hardware confirmation of the dual-core timing is the open item.
 
-Core 1 also runs the TinyUSB device stack and the sysex parser. The patch-swap
-handshake is lock-free by single-writer: core 1 stages an incoming snapshot and
-sets a ready flag; core 0 reads it at the next sample boundary, calls
+Core 1 also runs the TinyUSB stack. The role is read from the USB-C CC pins at
+boot: a downstream device (a USB MIDI keyboard) selects host mode; a computer (or
+an unrecognised board) selects device mode, which also runs the sysex parser. The
+patch-swap handshake is lock-free by single-writer: core 1 stages an incoming
+snapshot and sets a ready flag; core 0 reads it at the next sample boundary, calls
 `snapshot_apply`, and swaps the runtime pointer.
 
 ## Sysex transport
@@ -176,8 +216,9 @@ responses. The web editor uses the same framing layer as the CLI.
 
 `tools/` holds the build and codegen helpers: `build_web.js` bundles the
 compiler and prelude for the web editor, the `gen-*.js` scripts regenerate the
-pitch / rate / sine lookup tables baked into the runtime, and `cost.js` does
-static per-slot cost estimation over the kernel cost tables.
+pitch / rate / sine lookup tables baked into the runtime, and
+`attic/tools/cost.js` does static per-slot cost estimation over the kernel cost
+tables.
 
 ## Build and flash
 
@@ -213,22 +254,21 @@ node cli/cli.js perf                                  # read perf counters
 Three places:
 
 1. Add `(def name (fn (...) :kwargs (...)))` to `prelude.loupe` with a docstring.
-2. Add the JS kernel to the interpreter in `compiler/interp.js`.
+2. Wire the op to its kernel in `compiler/op-table.js` (inputs and param0 fields).
 3. Add the C kernel `op_name` to `runtime/runtime.c` and register it in `KTABLE`
    (and `KFN`).
 
-Then run the validator (`compiler/validate.js`) to confirm the prelude, the
-interpreter and the C kernel table agree, and add fixture cases for the new
+Then run the validator (`compiler/validate.js`) to confirm the prelude,
+`op-table.js`, and the C kernel table agree, and add fixture cases for the new
 kernel.
 
 ## Testing
 
-The host runner (`runtime/test/host_runner`) runs a compiled snapshot against a
+The host runner (`attic/test-runner/host_runner`) runs a compiled snapshot against a
 per-sample input trace. The gates compare the optimized walk against the
-`runtime_step_reference` oracle bit for bit (`attic/tests/oracle-diff.js`), hold
-behaviour across refactors with golden traces (`golden.js`), and drive an
-impulse through the audio buffers (`audio-gate.js`). The gate scripts live under
-`attic/` (gitignored).
+`runtime_step_reference` oracle bit for bit (`attic/tests/oracle-diff.js`) and
+drive an impulse through the audio buffers (`audio-gate.js`). The gate scripts
+live under `attic/` (gitignored).
 
 ## Hardware constraints
 

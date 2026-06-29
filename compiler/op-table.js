@@ -5,11 +5,17 @@
 
 // special, not table-driven:
 //   knob, cv-in, audio-in, pulse-in, switch   (hw leaf jacks; param0 = jack index)
+//   midi-note, midi-gate, midi-cc, midi-trig,  (MIDI leaf ops; param0 = midi_scratch index)
+//   midi-velocity, midi-bend, midi-pressure,
+//   midi-clock, midi-playing                   (single-slot: synced beat phasor + transport gate)
 //   phasor, sine, triangle, saw, square        (oscillators; rate-mode bits in param0)
+//     sine param0: mode bits1..0, pm bit2, depth bit3, phase bit4, fb (self-feedback) bit5
+//     sine inputs:  in0=phase/rate, in1=pm, in2=depth, in3=fb
 //   wave                                       (wavetable + drumrack variant; composite lowering)
 //   snap, quantise, range, cv, v-oct           (mode-word or static-mask param0 shapes)
 //   detent                                     (variadic snap-points; param0 = point count)
 //   tap                                        (cross-slot wiring to paired recordhead head)
+//   pluck                                       (Karplus-Strong; in0=trig in1=pitch in2=damp, in3=private audio delay buffer)
 //   recordhead_*                               (variant chosen by cable kwargs)
 //   morph                                      (variadic crossfade; param0 = input count)
 //   normal                                     (expander sugar: (if (connected jack) jack default))
@@ -43,6 +49,8 @@ const OP_TABLE = {
   min:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
   abs:       { inputs: [{kw:'x',default:0}] },
   rect:      { inputs: [{kw:'x',default:0}] },
+  exp2:      { inputs: [{kw:'in',default:0}] },
+  log2:      { inputs: [{kw:'in',default:0}] },
   and:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
   or:        { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
   xor:       { inputs: [{kw:'a',default:0}, {kw:'b',default:0}] },
@@ -89,6 +97,10 @@ const OP_TABLE = {
   // op_hold: in0=val, in1=gate
   hold:      { inputs: [{kw:'val',default:0}, {kw:'on',default:0}] },
 
+  // op_pickup: in0=live (knob), in1=on (selected gate); param0 = near | init<<16
+  pickup:    { inputs: [{kw:'value',default:0}, {kw:'on',default:0}],
+               param0: [{kw:'near',shift:0,width:16,default:0}, {kw:'init',shift:16,width:12,default:0}] },
+
   // op_gate: in0=signal, param0=len (0=kTickWidth)
   gate:      { inputs: [{kw:'in',default:0}],
                param0: [{kw:'len',shift:0,width:32,default:0}] },
@@ -111,6 +123,13 @@ const OP_TABLE = {
   // op_vcf: in0=sig, in1=cut, in2=res, param0=port (0=lp 1=hp 2=bp 3=notch)
   vcf:       { inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}, {kw:'res',default:2048}],
                param0: [{kw:'port',shift:0,width:2,default:0}] },
+  // resonant 2-pole SVF, single output per form (op_svf kernel, fixed port, audio-clamped).
+  lpf2:      { kernel:'op_svf', inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}, {kw:'res',default:0}],
+               param0: [{kw:'port',shift:0,width:2,default:0}] },
+  hpf2:      { kernel:'op_svf', inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}, {kw:'res',default:0}],
+               param0: [{kw:'port',shift:0,width:2,default:1}] },
+  bpf2:      { kernel:'op_svf', inputs: [{kw:'in',default:0}, {kw:'cut',default:2048}, {kw:'res',default:0}],
+               param0: [{kw:'port',shift:0,width:2,default:2}] },
 
   // op_wavefold: in0=sig, in1=drive
   wavefold:  { inputs: [{kw:'in',default:0}, {kw:'drive',default:0}] },
@@ -121,6 +140,13 @@ const OP_TABLE = {
   // op_saturate: in0=sig, in1=drive, in2=bias (bipolar), in3=mix, in4=level
   saturate:  { inputs: [{kw:'in',default:0}, {kw:'drive',default:0}, {kw:'bias',default:0},
                         {kw:'mix',default:4095}, {kw:'level',default:4095}] },
+
+  // op_shape: LUT waveshaper. in0=sig, in1=drive(0..VMAX, signal).
+  // param0 bits0..2 = curve (0 soft, 1 hard, 2 asym, 3 over),
+  // bit4 = 4x oversample (:oversample 1, off by default). Both structural.
+  shape:     { inputs: [{kw:'in',default:0}, {kw:'drive',default:0}],
+               param0: [{kw:'curve',shift:0,width:3,default:0},
+                        {kw:'oversample',shift:4,width:1,default:0}] },
 
   // ---- clocked generators -----------------------------------------------
   // op_random: in0=clk  (C reads s->in0 as clk)
@@ -152,6 +178,15 @@ const OP_TABLE = {
   // op_envelope: in0=trig, in1=decay, param0=peak (0=VMAX in kernel)
   envelope:  { inputs: [{kw:'trig',default:0}, {kw:'decay',default:2048}],
                param0: [{kw:'peak',shift:0,width:32,default:0}] },
+
+  // op_adsr: in0=gate, in1=attack, in2=decay, in3=sustain, in4=release, param0=peak
+  adsr:      { inputs: [{kw:'gate',default:0},{kw:'attack',default:512},{kw:'decay',default:1024},{kw:'sustain',default:4095},{kw:'release',default:1024}],
+               param0: [{kw:'peak',shift:0,width:32,default:0}] },
+
+  // op_dxeg: in0=gate, in1..in4=R1..R4 (0..99), param0 packs L1|L2<<8|L3<<16|L4<<24
+  //   (each a log-domain segment-target byte 0..255, == DX7 actuallevel>>4)
+  dxeg:      { inputs: [{kw:'gate',default:0},{kw:'r1',default:0},{kw:'r2',default:0},{kw:'r3',default:0},{kw:'r4',default:0}],
+               param0: [{kw:'l1',shift:0,width:8,default:0},{kw:'l2',shift:8,width:8,default:0},{kw:'l3',shift:16,width:8,default:0},{kw:'l4',shift:24,width:8,default:0}] },
 
   // op_follow: in0=base_ramp, in1=drift, param0=mult(low16)|div(high16)
   follow:    { inputs: [{kw:'base',default:0}, {kw:'drift',default:0}],

@@ -66,6 +66,11 @@ function parse(tokens) {
       }
       if (!peek()) throw new Error('Unclosed list');
       consume(); // consume )
+      // (quote (...)) is equivalent to the '(...) reader shorthand.
+      if (items.length === 2 && items[0].t === 'sym' && items[0].s === 'quote' &&
+          items[1].t === 'list') {
+        return { t: 'quote', items: items[1].items };
+      }
       return { t: 'list', items };
     }
 

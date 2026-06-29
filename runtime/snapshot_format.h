@@ -18,7 +18,7 @@
 /* ---- Magic / version ---- */
 #define LENS_MAGIC     { 0x4C, 0x45, 0x4E, 0x53, 0x32 } /* snapshot wire magic, 5 bytes */
 #define LENS_MAGIC_LEN 5
-#define LENS_VERSION   10
+#define LENS_VERSION   11
 #define LENS_MAX_BYTES 8192
 
 /* ---- HEADER (16 bytes, packed) ----
@@ -103,8 +103,9 @@ typedef struct {
 /* ---- TERMINAL TABLE ----
  *
  * Follows buffer table. terminal_count entries:
- *   jack_id = u8    (LENS_JACK_*)
- *   slot_id = u16 le  (original slot id from lowered graph)
+ *   jack_id  = u8     (LENS_JACK_*)
+ *   slot_idx = u16 le (walk-order index of the source slot)
+ *   mode     = u8     (0 = raw, 1 = v/oct pitch)
  */
 #define LENS_JACK_AUDIO_OUT_1 0
 #define LENS_JACK_AUDIO_OUT_2 1

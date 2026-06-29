@@ -1,0 +1,8 @@
+; CV + gate -> MIDI note out, knob -> CC out (USB device).
+; Connect USB-C to a DAW. The Computer sends MIDI notes and CC.
+;   cv-in 1    = pitch (0..127 MIDI note number)
+;   pulse-in 1 = gate (high = note on)
+;   knob main  = CC1 value
+(patch
+  (<- (midi-note-out :ch 1) (cv-in :1) :gate (pulse-in :1))
+  (<- (midi-cc-out :ch 1 :cc 1) (knob :main)))

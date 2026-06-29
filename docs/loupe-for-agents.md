@@ -113,7 +113,7 @@ A slow oscillator is an LFO. `(triangle :rate (knob :y))` is a gentle modulator.
 | `(clock :tempo t)` | a beat clock. `:bpm 120` or `:hz` also valid. |
 | `master` | default `(clock :bpm 120)`. Used when `:trig` is omitted. |
 | `(follow base :div n)` | derived clock 1/n as often, phase-locked. `:mult m` for faster. |
-| `(trig c)` | trigger pulse on each rising edge of `c` (default master) |
+| `(trig c)` | trigger pulse on each wrap/falling edge of `c`, the downbeat (default master) |
 | `(every n)` | true once every `n` ticks |
 | `(euclid pulses steps)` | Euclidean rhythm |
 
@@ -133,8 +133,9 @@ A slow oscillator is an LFO. `(triangle :rate (knob :y))` is a gentle modulator.
 ### Envelopes, edges, gates
 
 `(envelope :trig t :decay d :peak p)` decay envelope, pair with `vca`
-`(trig in)` / `(trig)` rising edge pulse, default master
-`(fall x)` `(toggle in)` `(diff in)` `(schmitt in :lo l :hi h)` `(gate in :thresh t :len l)` `(hold val :on g)`
+`(trig in)` / `(trig)` falling-edge pulse (phasor wrap = downbeat), default master
+`(edge in)` rising-edge pulse `(fall x)` falling-edge `(toggle in)` `(diff in)` `(schmitt in :lo l :hi h)` `(gate in :len l)` `(hold val :on g)`
+`(pickup :value knob :on sel :init d :near w)` soft-takeover: holds its value until the live knob crosses it
 
 ### Randomness
 
@@ -184,6 +185,15 @@ A lens of tapes: `(onsets (thru (lens four-on-floor son-clave) idx) :trig clk)`.
 `(groove :trig c (kick :on four-on-floor ...) (snare :on backbeat ...) ...)`: triggers each voice from a rhythm tape and mixes them.
 
 Rhythms: `four-on-floor backbeat eighths offbeat sixteenths downbeat tresillo cinquillo habanera son-clave rumba-clave bossa`
+
+### FM (DX7)
+
+`(dx :bank 0 :preset 0 :pitch p :gate g :decay d :tone t)`: a 6-operator DX7 voice read from a flash bank. `:bank`/`:preset` (compile-time indices) pick the voice; `:tone` shifts FM brightness and `:decay` scales the tails.
+
+### MIDI
+
+In: `(midi-note)` `(midi-gate)` `(midi-velocity)` `(midi-cc :1)` `(midi-bend)` `(midi-trig :note 60)` `(midi-clock)` `(midi-playing)`; add `:ch N` for one channel, omit for omni.
+Out: `(<- (midi-note-out :ch 1) pitch :gate g :vel v)`, `(<- (midi-cc-out :ch 1 :cc 1) v)`, `(<- (midi-clock-out) clk)`.
 
 ## Common traps
 

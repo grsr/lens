@@ -45,19 +45,14 @@ const STUB_KERNELS = [
 ];
 
 const BUDGET_PER_SAMPLE = 5208; // 250 MHz / 48 kHz
-const OVERHEAD_CORE0 = 2000;    // publish, ring, spin-wait, commit, drive outputs
-const OVERHEAD_CORE1 = 500;     // FIFO drain, signal done
+const OVERHEAD_CORE0 = 2000;    // ring doorbell, walk, publish shadows, commit, drive outputs
+const OVERHEAD_CORE1 = 500;     // doorbell IRQ entry, walk, publish shadows, signal done
 
-// --- Single-vs-dual decision knobs (TUNABLE) ---------------------------------
+// --- Partition tuning knobs (TUNABLE) ----------------------------------------
 // These are deliberately approximate. The real per-sample overheads will be
-// measured on hardware later (cost.py / perf probe); the threshold below only
-// needs to be in the right ballpark to keep trivial patches single-core.
+// measured on hardware later (cost.py / perf probe); they only need to be in the
+// right ballpark to balance the split.
 //
-// OVERHEAD_SINGLE: per-sample fixed cost the per-slot sum doesn't capture, measured
-//   on hardware as the walk intercept (~385 cyc fixed walk overhead) + io (~350:
-//   hw read, recordhead sweep, drive terminals). The per-kernel CYCLE_COST is the
-//   marginal slope; this is the intercept.
-const OVERHEAD_SINGLE = 735;
 // IMBALANCE_BOUND: edge-reduction local search may move a slot across cores
 //   only while |c0-c1|/total stays at or below this fraction. Keeps the split
 //   roughly balanced while trimming cross-core edges.
@@ -221,40 +216,25 @@ function edgeMinimisePass(slots, coreOf, pinnedToCore0) {
   return coreOf;
 }
 
-// Decide single-vs-dual for the slot list and return its coreOf map.
+// Partition the slot list across the two cores and return its coreOf map.
 //
-// total       = sum costOf over all slots in the group.
-// dual greedy = cost-balanced split -> per-core loads c0,c1.
-// single_wall = total + OVERHEAD_SINGLE  (no ring/spin/publish).
-// dual_wall   = max(c0 + OVERHEAD_CORE0, c1 + OVERHEAD_CORE1).
-//
-// Stay single-core when one core fits the budget AND it is no slower than the
-// dual split. Otherwise split and minimise cross-core edges. The returned map
-// plus a `dual` flag let the caller report the chosen mode.
+// Use both cores whenever there is parallel work to place on Core 1. The split
+// is race-free by construction: cross-core reads are unit-delayed through the
+// shadow published at the sample boundary, so the result is independent of which
+// core finishes first (dualcore-check verifies c0first == c1first). This trades a
+// 1-sample lag on cross-core outputs for running the graph on both cores. A patch
+// too small to fill a second core leaves c1 empty (dual=false); the runtime still
+// walks it through the same dual path, Core 1 just has nothing to do.
 function decidePartition(slots, pinnedToCore0) {
-  const total = slots.reduce((a, s) => a + costOf(s.kernel), 0);
-
-  // Tentative dual split (greedy balance, then edge minimisation).
   const dualCoreOf = greedyBalance(slots, pinnedToCore0);
   edgeMinimisePass(slots, dualCoreOf, pinnedToCore0);
-  const [c0, c1] = coreLoads(slots, dualCoreOf);
+  const [, c1] = coreLoads(slots, dualCoreOf);
 
-  const single_wall = total + OVERHEAD_SINGLE;
-  const dual_wall   = Math.max(c0 + OVERHEAD_CORE0, c1 + OVERHEAD_CORE1);
+  if (c1 > 0) return { coreOf: dualCoreOf, dual: true };
 
-  // Test hook: LENS_FORCE_DUAL forces a split so the dual-core path (cross-core
-  // shadows, serial-vs-c0first-vs-c1first equivalence) can be exercised even
-  // though the cost model currently keeps every real patch single-core.
-  if (typeof process !== 'undefined' && process.env.LENS_FORCE_DUAL && c1 > 0) return { coreOf: dualCoreOf, dual: true };
-
-  if (single_wall <= BUDGET_PER_SAMPLE && single_wall <= dual_wall) {
-    // Single-core: everything on Core 0; Core 1 stays empty so the runtime
-    // skips the doorbell handshake.
-    const coreOf = new Map();
-    for (const slot of slots) coreOf.set(slot.id, 0);
-    return { coreOf, dual: false };
-  }
-  return { coreOf: dualCoreOf, dual: true };
+  const coreOf = new Map();
+  for (const slot of slots) coreOf.set(slot.id, 0);
+  return { coreOf, dual: false };
 }
 
 // Build the ordered [{slotId, core}] list preserving topological order.
@@ -371,12 +351,11 @@ function terminalFeedPass(sortedSlots, coreOf, terminalWriteIds) {
 }
 
 // Returns per-core cycle budget report.
-// kernelOfSlot: Map<slotId, kernelName>
-// dual: when false (single-core), Core 0 pays only OVERHEAD_SINGLE (no doorbell
-//   ring/spin/publish) and Core 1 is empty, matching the runtime skip path.
-function verifyBudget(sampleRate, kernelOfSlot, dual = true) {
-  const overhead = dual ? [OVERHEAD_CORE0, OVERHEAD_CORE1]
-                        : [OVERHEAD_SINGLE, 0];
+// kernelOfSlot: Map<slotId, kernelName>. The runtime always runs the dual path
+// (Core 0 rings Core 1 each sample), so both cores carry their doorbell overhead
+// even when Core 1 is empty.
+function verifyBudget(sampleRate, kernelOfSlot) {
+  const overhead = [OVERHEAD_CORE0, OVERHEAD_CORE1];
   const sr = [0, 0];
   for (const entry of sampleRate) {
     const k = kernelOfSlot.get(entry.slotId) ?? 'unknown';
@@ -407,7 +386,6 @@ function schedule(graph) {
   const decision = decidePartition(sorted, terminalWriteIds);
   const coreOf = decision.coreOf;
   const dual = decision.dual;
-  const mode = dual ? 'dual' : 'single';
 
   // Cross-core edge counts before/after the edge-minimise pass, for reporting.
   let edgesBefore = 0, edgesAfter = 0;
@@ -425,7 +403,7 @@ function schedule(graph) {
   const { writerMap, violations } = buildWriterMap(graph.slots);
 
   const kernelOfSlot = new Map(graph.slots.map(s => [s.id, s.kernel]));
-  const budget = verifyBudget(sampleRate, kernelOfSlot, dual);
+  const budget = verifyBudget(sampleRate, kernelOfSlot);
 
   // Over-budget is a runtime performance concern, not a compile error: the patch
   // still produces a valid graph and the card runs it (degrading if truly over). So
@@ -460,7 +438,7 @@ function schedule(graph) {
 
   return {
     sampleRate, writerMap, violations, terminalFeedReport, budget,
-    mode, dual, edgesBefore, edgesAfter,
+    dual, edgesBefore, edgesAfter,
   };
 }
 

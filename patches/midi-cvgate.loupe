@@ -1,0 +1,12 @@
+; MIDI -> 2-channel CV/gate converter (USB device).
+; Two monophonic voices, one per MIDI channel, set here in the patch. The pitch
+; holds between notes (parser default), so the oscillator stays on the last note
+; while the gate closes it -- no warble in the gaps.
+;   cv-out 1/2 = pitch (v/oct)   pulse-out 1/2 = gate
+;   MIDI channel 1 -> voice 1     MIDI channel 2 -> voice 2
+;   For triggers instead of gates, wrap the gate: (edge (midi-gate :ch N)).
+(patch
+  (<- (cv-out :1 :v-oct) (midi-note :ch 1))
+  (<- (pulse-out :1)     (midi-gate :ch 1))
+  (<- (cv-out :2 :v-oct) (midi-note :ch 2))
+  (<- (pulse-out :2)     (midi-gate :ch 2)))

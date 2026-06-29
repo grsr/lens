@@ -119,6 +119,21 @@ enum KernelId {
     /* op_add2/mul2/or2/and2 aliases -> same ids as op_add/mul/or/and */
     /* op_terminal_write variants */
     KID_OP_TERMINAL_WRITE   = 105,
-    KID_COUNT               = 106,  /* valid ids are 0..KID_COUNT-1; sizes KFN */
+    KID_OP_RECORDHEAD_SEEK  = 106,  /* random-access tape write: write VAL at an index */
+    KID_OP_MIDI             = 107,  /* reads one int32 from midi_scratch[] via param0 */
+    KID_OP_MIDI_NOTE_OUT    = 108,  /* MIDI note-out sink: in0=pitch in1=gate in2=vel param0=ch */
+    KID_OP_MIDI_CC_OUT      = 109,  /* MIDI CC-out sink: in0=value param0=ch|(cc<<4) */
+    KID_OP_MIDI_CLOCK_OUT   = 110,  /* MIDI clock-out sink: in0=tick, emits 0xF8 on edge */
+    KID_OP_ADSR             = 111,  /* general ADSR envelope */
+    KID_OP_DXEG             = 112,  /* DX7-style 4-rate/4-level EG */
+    KID_OP_PLUCK            = 113,  /* Karplus-Strong plucked string (delay buffer in3) */
+    KID_OP_SVF              = 114,  /* resonant 2-pole Chamberlin SVF, audio-clamped (port in param0) */
+    KID_OP_SHAPE            = 115,  /* LUT waveshaper: 4 baked curves, opt-in 4x oversample (param0) */
+    KID_OP_EXP2             = 116,  /* exponential CV/VCA transfer (memoryless), fixed-point LUT */
+    KID_OP_LOG2             = 117,  /* inverse of exp2 (memoryless), fixed-point LUT */
+    KID_OP_DX               = 118,  /* fused DX7 voice kernel: blob+pitch+gate -> audio */
+    KID_OP_WAVETABLE        = 119,  /* flash-resident wavetable osc: pitch+pos+pm -> audio */
+    KID_OP_PICKUP           = 120,  /* soft-takeover: hold target until live knob crosses it */
+    KID_COUNT               = 121,  /* valid ids are 0..KID_COUNT-1; sizes KFN */
     KID_UNKNOWN             = 255
 };

@@ -6,36 +6,50 @@
 ;          Slope 1/2 -> Mix. audio-out 1/2 carry bench sines as a dry monitor.
 
 ; the four ops; each maps a note to a note
-(def same  (fn (:n) n))
-(def up   (fn (:n) (transpose n 12)))
-(def flip  (fn (:n) (sub 120 n)))
+(def same (fn (:n) n))
+(def up   (fn (:n) (transpose n  12)))
+(def flip (fn (:n) (sub 120 n)))
 (def down (fn (:n) (transpose n -12)))
-(def ops   (lens same up flip down))        ; a lens turns byte k on a tape into op k
+(def ops  (lens same up flip down))   ; a lens turns byte k on a tape into op k
 
 (patch
+  ; clocks
   (def master (clock :tempo (knob :x)))
   (def bar    (follow master :div 4))
   (def drift  (follow master :mult 15 :div 16))   ; voice-2 tune clock, 1 beat slower per 16: phases in/out
+
+  ; tapes
   (def tune (tape '(C4 E4 G4 B4)))
   (def prog (tape ops '(same up flip down)))
 
   ; keep-or-replace: rewrite the program tape each bar, the tune each beat
-  (<- prog (if (chance (knob :main) :trig bar) (step prog :trig bar) (random :trig bar)) :trig bar)
-  (<- tune (if (chance (knob :y)) (step tune) (snap (add C3 (spread (random) 25)) :scale minor)))
+  (<- prog (if (chance (knob :main) :trig bar)
+               (step prog :trig bar)
+               (random :trig bar))
+           :trig bar)
+  (<- tune (if (chance (knob :y))
+               (step tune)
+               (snap (add C3 (spread (random) 25)) :scale minor)))
 
-  (def v1     (step tune))
+  ; voice 1 = the tune, stepped on the beat
+  (def v1 (step tune))
+
   ; voice 2 = the program transform applied to a note. switch up: read the tune on the
   ; slow drift clock so the voices slide in/out of phase; else the locked v1. Select the
   ; NOTE (cheap) so there is a single transform chain, not one per branch.
-  (def v2note (if (gt (switch :z) VMID) (step tune :trig drift) v1))
+  (def v2note (if (gt (switch :z) VMID)
+                  (step tune :trig drift)
+                  v1))
   (def v2     ((thru ops (step prog :trig bar)) v2note))
+
   (def trig (trig master))
+
   (<- (cv-out :1 :v-oct) v1)
   (<- (cv-out :2 :v-oct) v2)
-  (<- (pulse-out :1) trig)
-  (<- (pulse-out :2) trig)
+  (<- (pulse-out :1)     trig)
+  (<- (pulse-out :2)     trig)
   ; bench-monitor sines so audio-out 1/2 carry the two voices dry when no external V/oct is wired.
-  (<- (audio-out :1) (sine v1))
-  (<- (audio-out :2) (sine v2))
-  (<- (led :0)       (step prog :trig bar))   ; show current op index directly
-  (<- (led :5)       (envelope :trig trig :decay 500)))   ; tempo blink
+  (<- (audio-out :1)     (sine v1))
+  (<- (audio-out :2)     (sine v2))
+  (<- (led :0)           (step prog :trig bar))               ; current op index
+  (<- (led :5)           (envelope :trig trig :decay 500)))   ; tempo blink
