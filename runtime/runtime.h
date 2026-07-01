@@ -104,6 +104,10 @@ struct LensRuntime {
      * skip its whole-slot scan on the common (no-delay) patch. */
     uint8_t                 has_recordhead;
 
+    /* Walk index of the master clock slot (0xFFFF = none). Core 0 edge-detects this
+     * slot's output to align beat/bar-quantised live swaps to the running tempo. */
+    uint16_t                master_slot_idx;
+
     /*
      * sample_counter: incremented by Core 0 at the end of each sample walk.
      * Core 1 spin-polls this; must be volatile so the compiler does not

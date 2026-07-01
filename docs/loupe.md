@@ -267,6 +267,14 @@ or declare a blank one and write into it live:
 (def buf (audio :seconds 1.5))   ; 1.5 s of empty audio buffer
 ```
 
+When you edit a patch and re-send it live, a written tape is restored to its
+written contents. Add `:keep` to keep a tape's live-evolved contents across such
+an edit instead, so a sequence you have hunted or recorded survives a tweak:
+
+```lisp
+(def loop (tape '(C3 Eb3 G3 Bb3) :keep))   ; keeps its mutations across a live edit
+```
+
 The pattern builders write rhythms and melodies as quoted lists and return a
 tape:
 

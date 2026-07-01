@@ -396,11 +396,16 @@ function expandNode(node, env, ctx) {
   }
 
   if (name === 'tape') {
+    // (tape '(...) :keep): keep the tape's live-evolved content across a same-layout
+    // live re-send instead of rewriting it from the written seed. Strip the flag here
+    // so the positional quote/subkind parse below is unaffected.
+    const keep = items.some(it => it.t === 'kw' && it.s === 'keep');
+    const targs = keep ? items.filter(it => !(it.t === 'kw' && it.s === 'keep')) : items;
     // (tape :len N): a blank tape of N cells. Length is stated directly in cells,
     // the tape's own unit -- no reverse-engineering from seconds and a clock rate.
-    const lenIdx = items.findIndex(it => it.t === 'kw' && it.s === 'len');
+    const lenIdx = targs.findIndex(it => it.t === 'kw' && it.s === 'len');
     if (lenIdx >= 0) {
-      const nNode = expandNode(items[lenIdx + 1], env, ctx);
+      const nNode = expandNode(targs[lenIdx + 1], env, ctx);
       if (!nNode || nNode.t !== 'num') {
         throw new Error('tape :len must be a constant number of cells');
       }
@@ -408,14 +413,14 @@ function expandNode(node, env, ctx) {
     }
     let subkind = null;
     let quoteNode;
-    if (items.length === 2 && items[1].t === 'quote') {
-      quoteNode = items[1];
-    } else if (items.length >= 3 && items[2] && items[2].t === 'quote') {
-      const sub = items[1];
+    if (targs.length === 2 && targs[1].t === 'quote') {
+      quoteNode = targs[1];
+    } else if (targs.length >= 3 && targs[2] && targs[2].t === 'quote') {
+      const sub = targs[1];
       subkind = sub.t === 'sym' ? sub.s : sub.t === 'kw' ? sub.s : null;
-      quoteNode = items[2];
+      quoteNode = targs[2];
     } else {
-      quoteNode = items[items.length - 1];
+      quoteNode = targs[targs.length - 1];
     }
     // Resolve a sym arg: (tape pat) where pat is bound to a quote node in the env.
     if (quoteNode && quoteNode.t === 'sym') {
@@ -475,6 +480,7 @@ function expandNode(node, env, ctx) {
 
     const result = { t: 'tape', items: tapeItems };
     if (subkind) result.subkind = subkind;
+    if (keep) result.keep = true;
     return result;
   }
 
@@ -1091,6 +1097,11 @@ function expandPatchBody(bodyForms, env, report, ctx) {
     const cable = expandCableForm(form, localEnv, ctx);
     report.cables.push(cable);
   }
+
+  // Tag the master clock node so the lowerer can record its slot. The runtime reads
+  // this slot's output to align beat/bar-quantised live swaps to the running tempo.
+  const mr = envLookup(localEnv, 'master');
+  if (mr.found && mr.value && typeof mr.value === 'object') mr.value._isMaster = true;
 }
 
 module.exports = { expand };

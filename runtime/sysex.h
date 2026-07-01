@@ -22,6 +22,7 @@ constexpr uint8_t CMD_PING          = 0x05;
 constexpr uint8_t CMD_READ_PERF     = 0x06;
 constexpr uint8_t CMD_DIAG          = 0x07;
 constexpr uint8_t CMD_SLOT_PERF     = 0x08;
+constexpr uint8_t CMD_SWAP_MODE     = 0x09;  /* 1 payload byte: 0=zero,1=beat,2=bar */
 constexpr uint8_t CMD_STATE_DUMP    = 0x10;
 constexpr uint8_t CMD_PERF_DUMP     = 0x11;
 constexpr uint8_t CMD_DIAG_DUMP     = 0x12;

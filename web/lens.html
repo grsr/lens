@@ -26,6 +26,9 @@
            border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
   button:hover { border-color: #7d7668; }
   button:disabled { opacity: .4; cursor: default; }
+  #livewrap { display: flex; align-items: center; gap: 5px; color: #9c9482;
+              cursor: pointer; user-select: none; }
+  #livewrap input { cursor: pointer; }
   #status { margin-left: auto; color: #7d7668; max-width: 46%; }
   #status.err { color: #e07a5f; }
   #status.ok  { color: #9fd08a; }
@@ -66,6 +69,8 @@
   <input id="filepick" type="file" accept=".loupe" style="display:none">
   <button id="connect">connect</button>
   <button id="send" disabled>send</button>
+  <label id="livewrap" title="push every good compile straight to the card as you type"><input id="live" type="checkbox"> live</label>
+  <select id="swapmode" title="when a live edit swaps in"><option value="0">at zero</option><option value="1">at beat</option><option value="2">at bar</option></select>
   <button id="savecard" disabled title="writes the patch to the card's flash; the card reboots">save to card</button>
   <span id="status"></span>
 </div>
@@ -82,7 +87,7 @@
   (&lt;- (audio-out :1) (sine (add C3 (spread (knob :main) 24)))))
 </textarea>
 </main>
-<footer>edits compile as you type &middot; send = play it now &middot; save to card = survives power-off &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://grsr.github.io/lens/docs/loupe.html" target="_blank">loupe docs</a></footer>
+<footer>edits compile as you type &middot; ⌘/Ctrl-↵ send &middot; ⌘/Ctrl-S save to card &middot; ⌘/Ctrl-. hush &middot; ⌘/Ctrl-⇧-Z revert &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://grsr.github.io/lens/docs/loupe.html" target="_blank">loupe docs</a></footer>
 <script>
   window.addEventListener("error", function (e) {
     var s = document.getElementById("status");
@@ -618,11 +623,16 @@ function expandNode(node, env, ctx) {
   }
 
   if (name === 'tape') {
+    // (tape '(...) :keep): keep the tape's live-evolved content across a same-layout
+    // live re-send instead of rewriting it from the written seed. Strip the flag here
+    // so the positional quote/subkind parse below is unaffected.
+    const keep = items.some(it => it.t === 'kw' && it.s === 'keep');
+    const targs = keep ? items.filter(it => !(it.t === 'kw' && it.s === 'keep')) : items;
     // (tape :len N): a blank tape of N cells. Length is stated directly in cells,
     // the tape's own unit -- no reverse-engineering from seconds and a clock rate.
-    const lenIdx = items.findIndex(it => it.t === 'kw' && it.s === 'len');
+    const lenIdx = targs.findIndex(it => it.t === 'kw' && it.s === 'len');
     if (lenIdx >= 0) {
-      const nNode = expandNode(items[lenIdx + 1], env, ctx);
+      const nNode = expandNode(targs[lenIdx + 1], env, ctx);
       if (!nNode || nNode.t !== 'num') {
         throw new Error('tape :len must be a constant number of cells');
       }
@@ -630,14 +640,14 @@ function expandNode(node, env, ctx) {
     }
     let subkind = null;
     let quoteNode;
-    if (items.length === 2 && items[1].t === 'quote') {
-      quoteNode = items[1];
-    } else if (items.length >= 3 && items[2] && items[2].t === 'quote') {
-      const sub = items[1];
+    if (targs.length === 2 && targs[1].t === 'quote') {
+      quoteNode = targs[1];
+    } else if (targs.length >= 3 && targs[2] && targs[2].t === 'quote') {
+      const sub = targs[1];
       subkind = sub.t === 'sym' ? sub.s : sub.t === 'kw' ? sub.s : null;
-      quoteNode = items[2];
+      quoteNode = targs[2];
     } else {
-      quoteNode = items[items.length - 1];
+      quoteNode = targs[targs.length - 1];
     }
     // Resolve a sym arg: (tape pat) where pat is bound to a quote node in the env.
     if (quoteNode && quoteNode.t === 'sym') {
@@ -697,6 +707,7 @@ function expandNode(node, env, ctx) {
 
     const result = { t: 'tape', items: tapeItems };
     if (subkind) result.subkind = subkind;
+    if (keep) result.keep = true;
     return result;
   }
 
@@ -1313,6 +1324,11 @@ function expandPatchBody(bodyForms, env, report, ctx) {
     const cable = expandCableForm(form, localEnv, ctx);
     report.cables.push(cable);
   }
+
+  // Tag the master clock node so the lowerer can record its slot. The runtime reads
+  // this slot's output to align beat/bar-quantised live swaps to the running tempo.
+  const mr = envLookup(localEnv, 'master');
+  if (mr.found && mr.value && typeof mr.value === 'object') mr.value._isMaster = true;
 }
 
 module.exports = { expand };
@@ -1630,6 +1646,7 @@ function lower(expanded) {
   const slots = [];
   const buffers = [];
   const terminals = [];
+  let masterSlotId = null;   // slot of the master clock, for beat/bar swaps
 
   // Memoisation: AST node object (by identity) -> lowered Ref.
   const memo = new Map();
@@ -1651,10 +1668,11 @@ function lower(expanded) {
     return { kind: 'slot', id };
   }
 
-  function allocBuffer(kind, length, seed) {
+  function allocBuffer(kind, length, seed, keep) {
     const id = nextBufId++;
     const entry = { id, kind, length };
     if (seed !== undefined) entry.seed = seed;
+    if (keep) entry.keep = true;
     buffers.push(entry);
     return { kind: 'buffer', id };
   }
@@ -1670,6 +1688,8 @@ function lower(expanded) {
 
     const ref = lowerNodeInner(node);
     memo.set(node, ref);
+    // Record the master clock's slot (tagged by the expander) for beat/bar swaps.
+    if (node._isMaster && ref && ref.kind === 'slot') masterSlotId = ref.id;
     return ref;
   }
 
@@ -2295,7 +2315,7 @@ function lower(expanded) {
       if (item.t === 'sym') throw new Error(`unknown name: ${item.s}`);
       return 0;
     });
-    const ref = allocBuffer('tape', seed.length, seed);
+    const ref = allocBuffer('tape', seed.length, seed, node.keep);
     bufMemo.set(node, ref);
     return ref;
   }
@@ -2649,7 +2669,7 @@ function lower(expanded) {
     slot.kernel = kernel;
   }
 
-  return { buffers, slots, terminals };
+  return { buffers, slots, terminals, masterSlotId };
 }
 
 // Sanity check: assert structural invariants on a lowered graph.
@@ -3319,7 +3339,10 @@ function encode(scheduled, graph) {
   w.u16(VERSION);
   w.u16(0); // flags (reserved)
   w.u16(allEntries.length);  // slot_count
-  w.u16(0);                  // reserved
+  // master clock slot in walk order (0xFFFF = none), for beat/bar-quantised swaps
+  const masterWalk = (graph.masterSlotId != null && walkOrderOf.has(graph.masterSlotId))
+    ? walkOrderOf.get(graph.masterSlotId) : 0xFFFF;
+  w.u16(masterWalk);         // master_slot_idx
   w.u16(0);                  // reserved
   w.u8(graph.buffers.length); // buffer_count
   w.u8(graph.terminals.length); // terminal_count
@@ -3374,8 +3397,11 @@ function encode(scheduled, graph) {
   for (const buf of graph.buffers) {
     w.u8(BUF_KINDS[buf.kind] ?? 0);
     w.u32(buf.length); // SPEC: u32 to handle audio buffers > 65535 cells
+    // Flags byte: bit0 = seed data follows, bit1 = keep (preserve live-evolved
+    // content across a same-layout swap instead of re-applying the seed).
     const hasSeed = buf.seed && buf.seed.length > 0 ? 1 : 0;
-    w.u8(hasSeed);
+    const flags = hasSeed | (buf.keep ? 2 : 0);
+    w.u8(flags);
     if (hasSeed) {
       for (let i = 0; i < buf.length; i++) {
         w.u16(buf.seed[i] ?? 0);
@@ -3441,7 +3467,7 @@ function decode(bytes) {
   if (version !== VERSION) throw new Error(`version mismatch: got ${version}, want ${VERSION}`);
   r.u16(); // flags
   const slot_count = r.u16();
-  r.u16(); // reserved
+  const master_slot_idx = r.u16(); // master clock walk index (0xFFFF = none)
   r.u16(); // reserved
   const buffer_count = r.u8();
   const terminal_count = r.u8();
@@ -3504,9 +3530,10 @@ function decode(bytes) {
   for (let i = 0; i < buffer_count; i++) {
     const kindByte = r.u8();
     const length = r.u32();
-    const hasSeed = r.u8();
+    const flags = r.u8();
     const buf = { id: i, kind: BUF_KIND_NAMES[kindByte] ?? 'tape', length };
-    if (hasSeed) {
+    if (flags & 2) buf.keep = true;
+    if (flags & 1) {
       const seed = [];
       for (let j = 0; j < length; j++) seed.push(r.u16());
       buf.seed = seed;
@@ -3533,6 +3560,7 @@ function decode(bytes) {
 
   return {
     sampleRate,
+    masterSlotIdx: master_slot_idx === 0xFFFF ? null : master_slot_idx,
     buffers,
     terminals,
     _kernelNames: kernelNames,
@@ -3683,6 +3711,7 @@ const CMD = {
   READ_PERF:       0x06,
   DIAG:            0x07,
   SLOT_PERF:       0x08,
+  SWAP_MODE:       0x09,
   STATE_DUMP:      0x10,
   PERF_DUMP:       0x11,
   DIAG_DUMP:       0x12,
@@ -3761,9 +3790,22 @@ const $ = (id) => document.getElementById(id);
 const editor = $("editor"), hl = $("hl"), statusEl = $("status"), picker = $("picker");
 const btnConnect = $("connect"), btnSend = $("send"), btnSaveCard = $("savecard");
 const btnOpen = $("open"), btnSave = $("save"), filePick = $("filepick");
+const liveToggle = $("live");
+const swapSel = $("swapmode");
 
 let midiOut = null, midiIn = null, ackWaiter = null;
 let snapshot = null;        // last good compile's bytes
+let sending = false;        // guards against overlapping live-pushes
+let lastSent = null;        // bytes confirmed on the card (skip-identical + sync state)
+const history = [];         // ring of { bytes, text } sent patches, for revert
+let histPos = -1;           // current position in history
+let hushBytes = null;       // compiled silent patch, built on first hush
+
+function bytesEq(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 
 const say = (msg, cls) => { statusEl.textContent = msg; statusEl.className = cls || ""; };
 
@@ -3832,13 +3874,17 @@ async function refresh() {
     const scheduled  = Lens.schedule(lowered);
     snapshot = Lens.encode(scheduled, lowered);
     const nodeCount = lowered.slots ? lowered.slots.length : 0;
-    say(nodeCount + " nodes · " + snapshot.length + " B"
-        + (midiOut ? " · " + midiOut.name : " · not connected"), "ok");
+    const sync = !midiOut ? " · not connected"
+               : bytesEq(snapshot, lastSent) ? " · on card" : " · unsent edits";
+    say(nodeCount + " nodes · " + snapshot.length + " B" + sync, "ok");
   } catch (e) {
     snapshot = null;
     say(e.message, "err");
   }
   btnSend.disabled = btnSaveCard.disabled = !(snapshot && midiOut);
+  // live mode: push every good compile straight to the card (same WRITE_STATE path
+  // as the send button). The input debounce upstream keeps this from flooding.
+  if (snapshot && midiOut && liveToggle && liveToggle.checked) send();
 }
 
 function loadText(text) { editor.value = text; paint(); refresh(); }
@@ -3856,6 +3902,7 @@ async function connect() {
       if (m && ackWaiter) { const w = ackWaiter; ackWaiter = null; w(m); }
     };
     btnConnect.textContent = "connected";
+    await sendSwapMode();
     refresh();
   } catch (e) { say("midi: " + e.message, "err"); }
 }
@@ -3865,9 +3912,9 @@ const recv = (ms = 1500) => new Promise((res, rej) => {
   ackWaiter = (m) => { clearTimeout(t); res(m); };
 });
 
-async function writePatch() {
+async function pushBytes(bytes) {
   for (let t = 0; t < 4; t++) {
-    midiOut.send([...Lens.frame(Lens.CMD.WRITE_STATE, snapshot)]);
+    midiOut.send([...Lens.frame(Lens.CMD.WRITE_STATE, bytes)]);
     const m = await recv();
     if (m.cmd === Lens.CMD.ACK) return;
     if (m.cmd === Lens.CMD.NACK && m.payload[1] === 0x06) { await new Promise(r => setTimeout(r, 150)); continue; }
@@ -3876,19 +3923,75 @@ async function writePatch() {
   throw new Error("card stayed busy");
 }
 
+// Append a sent patch to the revert ring, dropping any reverted-past "future".
+function pushHistory(bytes, text) {
+  if (histPos < history.length - 1) history.splice(histPos + 1);
+  history.push({ bytes, text });
+  if (history.length > 50) history.shift();
+  histPos = history.length - 1;
+}
+
+// Tell the card when a live edit should swap in: 0 = next near-zero sample,
+// 1 = next beat, 2 = next bar (aligned to the running patch's master clock).
+async function sendSwapMode() {
+  if (!midiOut) return;
+  midiOut.send([...Lens.frame(Lens.CMD.SWAP_MODE, [parseInt(swapSel.value, 10)])]);
+  try { await recv(800); } catch (_) {}
+}
+
 async function send() {
-  if (!snapshot || !midiOut) return;
+  if (!snapshot || !midiOut || sending) return;
+  if (bytesEq(snapshot, lastSent)) { say("on card · unchanged", "ok"); return; }
+  sending = true;
   btnSend.disabled = true;
-  try { await writePatch(); say("sent · playing", "ok"); }
+  try {
+    await pushBytes(snapshot);
+    lastSent = snapshot;
+    pushHistory(snapshot, editor.value);
+    say("sent · playing", "ok");
+  }
   catch (e) { say(e.message, "err"); }
-  btnSend.disabled = !(snapshot && midiOut);
+  finally { sending = false; btnSend.disabled = !(snapshot && midiOut); }
+}
+
+// Send a silent patch immediately (panic/stop). Does not touch the revert ring,
+// so a normal send afterwards brings the music back.
+async function hush() {
+  if (!midiOut || sending) return;
+  if (!hushBytes) {
+    try {
+      const lo = Lens.lower(Lens.expand(Lens.read("(patch (<- (audio-out :1) 0) (<- (audio-out :2) 0))"), { loadFile }));
+      hushBytes = Lens.encode(Lens.schedule(lo), lo);
+    } catch (_) { say("hush compile failed", "err"); return; }
+  }
+  sending = true;
+  try { await pushBytes(hushBytes); lastSent = hushBytes; say("hush · silent", "ok"); }
+  catch (e) { say(e.message, "err"); }
+  finally { sending = false; }
+}
+
+// Step back to the previously sent patch: restores the editor text and the card.
+async function revert() {
+  if (sending) return;
+  if (histPos <= 0) { say("nothing earlier to revert to", ""); return; }
+  if (!midiOut) { say("not connected", "err"); return; }
+  histPos--;
+  const entry = history[histPos];
+  editor.value = entry.text; paint();
+  snapshot = entry.bytes;
+  sending = true;
+  try { await pushBytes(entry.bytes); lastSent = entry.bytes; say("reverted · " + (histPos + 1) + "/" + history.length, "ok"); }
+  catch (e) { say(e.message, "err"); }
+  finally { sending = false; btnSend.disabled = btnSaveCard.disabled = !(snapshot && midiOut); }
 }
 
 async function saveToCard() {
   if (!snapshot || !midiOut) return;
   btnSaveCard.disabled = true;
   try {
-    await writePatch();
+    await pushBytes(snapshot);
+    lastSent = snapshot;
+    pushHistory(snapshot, editor.value);
     await new Promise(r => setTimeout(r, 700));
     midiOut.send([...Lens.frame(Lens.CMD.SAVE_STATE)]);
     const m = await recv(3000);
@@ -3903,8 +4006,20 @@ async function saveToCard() {
 let timer = null;
 editor.addEventListener("input", () => { paint(); clearTimeout(timer); timer = setTimeout(refresh, 250); });
 editor.addEventListener("scroll", syncScroll);
+// Live-coding keys: Cmd/Ctrl-Enter sends, Cmd/Ctrl-S saves to card, Cmd/Ctrl-.
+// hushes (silence), Cmd/Ctrl-Shift-Z reverts the last send.
+window.addEventListener("keydown", (e) => {
+  const cmd = e.metaKey || e.ctrlKey;
+  if (!cmd) return;
+  const k = e.key.toLowerCase();
+  if (k === "enter")                  { e.preventDefault(); send(); }
+  else if (k === "s")                 { e.preventDefault(); saveToCard(); }
+  else if (k === ".")                 { e.preventDefault(); hush(); }
+  else if (k === "z" && e.shiftKey)   { e.preventDefault(); revert(); }
+});
 btnConnect.addEventListener("click", connect);
 btnSend.addEventListener("click", send);
+swapSel.addEventListener("change", sendSwapMode);
 btnSaveCard.addEventListener("click", saveToCard);
 btnOpen.addEventListener("click", () => filePick.click());
 filePick.addEventListener("change", () => {

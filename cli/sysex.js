@@ -12,6 +12,7 @@ const CMD = {
   READ_PERF:       0x06,
   DIAG:            0x07,
   SLOT_PERF:       0x08,
+  SWAP_MODE:       0x09,
   STATE_DUMP:      0x10,
   PERF_DUMP:       0x11,
   DIAG_DUMP:       0x12,

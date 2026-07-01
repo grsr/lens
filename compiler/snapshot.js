@@ -142,7 +142,10 @@ function encode(scheduled, graph) {
   w.u16(VERSION);
   w.u16(0); // flags (reserved)
   w.u16(allEntries.length);  // slot_count
-  w.u16(0);                  // reserved
+  // master clock slot in walk order (0xFFFF = none), for beat/bar-quantised swaps
+  const masterWalk = (graph.masterSlotId != null && walkOrderOf.has(graph.masterSlotId))
+    ? walkOrderOf.get(graph.masterSlotId) : 0xFFFF;
+  w.u16(masterWalk);         // master_slot_idx
   w.u16(0);                  // reserved
   w.u8(graph.buffers.length); // buffer_count
   w.u8(graph.terminals.length); // terminal_count
@@ -197,8 +200,11 @@ function encode(scheduled, graph) {
   for (const buf of graph.buffers) {
     w.u8(BUF_KINDS[buf.kind] ?? 0);
     w.u32(buf.length); // SPEC: u32 to handle audio buffers > 65535 cells
+    // Flags byte: bit0 = seed data follows, bit1 = keep (preserve live-evolved
+    // content across a same-layout swap instead of re-applying the seed).
     const hasSeed = buf.seed && buf.seed.length > 0 ? 1 : 0;
-    w.u8(hasSeed);
+    const flags = hasSeed | (buf.keep ? 2 : 0);
+    w.u8(flags);
     if (hasSeed) {
       for (let i = 0; i < buf.length; i++) {
         w.u16(buf.seed[i] ?? 0);
@@ -264,7 +270,7 @@ function decode(bytes) {
   if (version !== VERSION) throw new Error(`version mismatch: got ${version}, want ${VERSION}`);
   r.u16(); // flags
   const slot_count = r.u16();
-  r.u16(); // reserved
+  const master_slot_idx = r.u16(); // master clock walk index (0xFFFF = none)
   r.u16(); // reserved
   const buffer_count = r.u8();
   const terminal_count = r.u8();
@@ -327,9 +333,10 @@ function decode(bytes) {
   for (let i = 0; i < buffer_count; i++) {
     const kindByte = r.u8();
     const length = r.u32();
-    const hasSeed = r.u8();
+    const flags = r.u8();
     const buf = { id: i, kind: BUF_KIND_NAMES[kindByte] ?? 'tape', length };
-    if (hasSeed) {
+    if (flags & 2) buf.keep = true;
+    if (flags & 1) {
       const seed = [];
       for (let j = 0; j < length; j++) seed.push(r.u16());
       buf.seed = seed;
@@ -356,6 +363,7 @@ function decode(bytes) {
 
   return {
     sampleRate,
+    masterSlotIdx: master_slot_idx === 0xFFFF ? null : master_slot_idx,
     buffers,
     terminals,
     _kernelNames: kernelNames,

@@ -196,6 +196,12 @@ extern "C" void lens_request_factory_reset(void) {
  * reads it once at startup to select the USB init path. */
 volatile uint8_t g_usb_host_mode = 0;
 
+/* Live-swap timing, set over sysex (CMD_SWAP_MODE). Written by Core 1, read by
+ * Core 0. ZERO = next near-zero audio sample (default, click-free). BEAT / BAR =
+ * align the swap to the running patch's master clock (a bar is 4 beats). */
+enum { SWAP_AT_ZERO = 0, SWAP_AT_BEAT = 1, SWAP_AT_BAR = 2 };
+volatile uint8_t g_swap_mode = SWAP_AT_ZERO;
+
 /*
  * Perform flash save: erase slot, write magic+len+snapshot+crc32, reboot.
  * Must be called with Core 1 reset and interrupts disabled.
@@ -356,9 +362,41 @@ protected:
         uint32_t t0 = dwt_read();
 #endif
 
-        /* Apply runs on Core 0 here, immediately, no quiet gate. One glitched
-         * sample on patch swap is acceptable. */
-        if (g_pending.ready) {
+        /* Click-free swap: defer the pending apply until the audio output is near a
+         * zero crossing, with a short timeout so a sustained drone still swaps. The
+         * jacks are driven by Core 0 (this ISR), so last sample's output is known
+         * here; no cross-core read is needed. Combined with node-state preservation,
+         * a same-layout edit swaps continuously and any residual parameter jump lands
+         * quietly. (No crossfade: that would run two graphs at once, which the RAM
+         * and CPU budget cannot spare.) */
+        static int32_t  g_last_out_1 = 0;
+        static int32_t  g_last_out_2 = 0;
+        static uint32_t g_swap_wait  = 0;
+        /* Master-clock beat tracking (updated after the walk, below) for beat/bar
+           swap timing: g_beat_now marks a downbeat sample, g_beat_count counts
+           beats since the current patch landed (so beat 4/8/12 = a bar boundary). */
+        static int32_t  g_master_prev = 0;
+        static uint32_t g_beat_count  = 0;
+        static bool     g_beat_now    = false;
+        constexpr int32_t  kSwapZeroThresh = 32;       /* on the +-2047 audio scale */
+        constexpr uint32_t kSwapMaxWait    = 480;      /* ~10 ms at 48 kHz */
+        constexpr uint32_t kSwapMaxWaitClk = 192000u;  /* ~4 s: fallback if the clock is stopped */
+        {
+        bool near_zero = (g_last_out_1 > -kSwapZeroThresh && g_last_out_1 < kSwapZeroThresh &&
+                          g_last_out_2 > -kSwapZeroThresh && g_last_out_2 < kSwapZeroThresh);
+        uint8_t mode = g_swap_mode;
+        bool have_master = g_rt && g_rt->master_slot_idx != 0xFFFFu;
+        bool boundary;
+        uint32_t maxwait;
+        if (mode == SWAP_AT_BEAT && have_master) {
+            boundary = g_beat_now;                                 maxwait = kSwapMaxWaitClk;
+        } else if (mode == SWAP_AT_BAR && have_master) {
+            boundary = g_beat_now && (g_beat_count % 4u == 0u);    maxwait = kSwapMaxWaitClk;
+        } else {
+            boundary = near_zero;                                  maxwait = kSwapMaxWait;
+        }
+        if (g_pending.ready && (boundary || g_swap_wait >= maxwait)) {
+            g_swap_wait = 0;
             __dmb();   /* pair with the Core 1 writer: read len after seeing ready */
             struct LensRuntime* new_rt = nullptr;
             size_t plen = g_pending.len;
@@ -376,8 +414,13 @@ protected:
                 struct LensRuntime* old_rt = g_rt;
                 g_rt = new_rt;
                 if (old_rt) runtime_destroy(old_rt);
+                /* New patch starts at its own downbeat: restart beat tracking. */
+                g_master_prev = 0; g_beat_count = 0; g_beat_now = false;
             }
             g_pending.ready = false;
+        } else if (g_pending.ready) {
+            g_swap_wait++;   /* a swap is queued but no boundary reached yet */
+        }
         }
 
         /* Handle CMD_SAVE_STATE: erase + write flash slot then reboot. */
@@ -454,6 +497,20 @@ protected:
             runtime_drive_terminals(rt, &hw_out);
             rt->sample_counter = seq + 1;
         }
+
+        /* Beat detect on the master clock for beat/bar-quantised live swaps: a rising
+           edge through a low threshold marks the downbeat (one detector serves a ramp
+           clock, which crosses just after its wrap, and a pulse, which crosses on
+           arrival). Mirrors the runtime's own clock edge detector. */
+        if (rt->master_slot_idx != 0xFFFFu && rt->master_slot_idx < rt->slot_count) {
+            int32_t mv = *(volatile int32_t*)rt->slots[rt->master_slot_idx].out;
+            constexpr int32_t kBeatLevel = VMAX / 16;
+            g_beat_now = (mv > kBeatLevel) && (g_master_prev <= kBeatLevel);
+            g_master_prev = mv;
+            if (g_beat_now) g_beat_count++;
+        } else {
+            g_beat_now = false;
+        }
 #if LENS_PERF_PROBE
         uint32_t t_walk_done = dwt_read();
 #endif
@@ -522,6 +579,10 @@ protected:
 #endif
         AudioOut1(static_cast<int16_t>(hw_out.audio_out_1));
         AudioOut2(static_cast<int16_t>(hw_out.audio_out_2));
+        /* Remember this sample's audio out so the next pending swap can wait for a
+           zero crossing (see the click-free swap gate at the top of ProcessSample). */
+        g_last_out_1 = hw_out.audio_out_1;
+        g_last_out_2 = hw_out.audio_out_2;
         /* A pitch cv-out (source is v-oct) carries a MIDI note: use the card's
            per-unit calibrated 1V/oct path. Otherwise drive the raw value. */
         if (hw_out.cv_out_1_is_pitch) CVOut1MIDINote(static_cast<uint8_t>(hw_out.cv_out_1));
@@ -670,6 +731,16 @@ static void run_device_loop(void) {
                     case lenssysex::CMD_PING:
                         lenssysex::sysex_send_frame(lenssysex::CMD_ACK, nullptr, 0);
                         break;
+
+                    case lenssysex::CMD_SWAP_MODE: {
+                        /* 1 payload byte selects when a live WRITE_STATE swaps in:
+                           0 = next near-zero sample, 1 = next beat, 2 = next bar. */
+                        uint8_t mb[1];
+                        size_t n = lenssysex::get_payload(&parser, mb, sizeof(mb));
+                        if (n >= 1 && mb[0] <= SWAP_AT_BAR) g_swap_mode = mb[0];
+                        lenssysex::sysex_send_frame(lenssysex::CMD_ACK, nullptr, 0);
+                        break;
+                    }
 
                     case lenssysex::CMD_DIAG: {
                         /* DIAG_DUMP payload (v2):

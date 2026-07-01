@@ -172,6 +172,9 @@ const html = `<!doctype html>
            border-radius: 5px; padding: 4px 12px; font: inherit; cursor: pointer; }
   button:hover { border-color: #7d7668; }
   button:disabled { opacity: .4; cursor: default; }
+  #livewrap { display: flex; align-items: center; gap: 5px; color: #9c9482;
+              cursor: pointer; user-select: none; }
+  #livewrap input { cursor: pointer; }
   #status { margin-left: auto; color: #7d7668; max-width: 46%; }
   #status.err { color: #e07a5f; }
   #status.ok  { color: #9fd08a; }
@@ -212,6 +215,8 @@ const html = `<!doctype html>
   <input id="filepick" type="file" accept=".loupe" style="display:none">
   <button id="connect">connect</button>
   <button id="send" disabled>send</button>
+  <label id="livewrap" title="push every good compile straight to the card as you type"><input id="live" type="checkbox"> live</label>
+  <select id="swapmode" title="when a live edit swaps in"><option value="0">at zero</option><option value="1">at beat</option><option value="2">at bar</option></select>
   <button id="savecard" disabled title="writes the patch to the card's flash; the card reboots">save to card</button>
   <span id="status"></span>
 </div>
@@ -219,7 +224,7 @@ const html = `<!doctype html>
   <pre id="hl" aria-hidden="true"></pre>
   <textarea id="editor" spellcheck="false" autocomplete="off" autocapitalize="off">${starter.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</textarea>
 </main>
-<footer>edits compile as you type &middot; send = play it now &middot; save to card = survives power-off &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://grsr.github.io/lens/docs/loupe.html" target="_blank">loupe docs</a></footer>
+<footer>edits compile as you type &middot; ⌘/Ctrl-↵ send &middot; ⌘/Ctrl-S save to card &middot; ⌘/Ctrl-. hush &middot; ⌘/Ctrl-⇧-Z revert &middot; Chrome/Edge only (WebMIDI) &middot; <a href="https://grsr.github.io/lens/docs/loupe.html" target="_blank">loupe docs</a></footer>
 <script>
   window.addEventListener("error", function (e) {
     var s = document.getElementById("status");

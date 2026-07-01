@@ -4,7 +4,7 @@
 
 # Lens
 
-> **0.2 alpha.** Lens is early and shared so people can start playing with it,
+> **0.3 alpha.** Lens is early and shared so people can start playing with it,
 > not as a finished release. Expect rough edges, patches that misbehave, and
 > outright bugs. Loupe is a little language that lets you combine things in lots
 > of ways, so testing every combination is more than I can do alone. Releasing
@@ -53,6 +53,11 @@ The [web editor](https://grsr.github.io/lens/web/) is the easiest way in, and th
 one most people will want. Open it in Chrome or Edge (WebMIDI is needed), connect,
 pick an example from the dropdown, edit, and send it to the card. It can also save
 the patch into the card's flash so it survives a power cycle.
+
+Editing is live. Tick **live** and every good compile is sent to the card as you
+type. A same-shape edit (changing a number) keeps the running patch going with no
+glitch, and you can quantise the swap to the next beat or bar. Keys: Cmd/Ctrl-Enter
+sends, Cmd/Ctrl-S saves to the card, Cmd/Ctrl-. hushes, Cmd/Ctrl-Shift-Z reverts.
 
 For development and scripted flashing there is a Node CLI:
 

@@ -132,7 +132,19 @@ async function main() {
   const portArg = (() => { const k = rest.indexOf('--port'); return k >= 0 ? rest[k + 1] : undefined; })();
   const hasFlag = f => rest.includes(f);
   const flagVal = f => { const k = rest.indexOf(f); return k >= 0 ? rest[k + 1] : undefined; };
-  const positional = rest.filter((a, i) => !a.startsWith('--') && rest[i - 1] !== '--port' && rest[i - 1] !== '--samples');
+  const positional = rest.filter((a, i) => !a.startsWith('--') && rest[i - 1] !== '--port' && rest[i - 1] !== '--samples' && rest[i - 1] !== '--at');
+  // --at zero|beat|bar: when a live write swaps in (default zero = next near-zero sample).
+  const swapMode = (() => {
+    const v = flagVal('--at');
+    if (v === undefined) return null;
+    const m = { zero: 0, beat: 1, bar: 2 }[v];
+    if (m === undefined) throw new Error('--at must be zero, beat, or bar');
+    return m;
+  })();
+  const setSwapMode = async (send, recv) => {
+    if (swapMode === null) return;
+    send(CMD.SWAP_MODE, [swapMode]); expectAck(await recv());
+  };
 
   switch (cmd) {
     case 'ping':
@@ -144,6 +156,7 @@ async function main() {
       const save = hasFlag('--save');
       const snapshot = snapshotFromPatch(file);
       await withDevice(portArg, async (send, recv) => {
+        await setSwapMode(send, recv);
         await writeState(send, recv, snapshot);
         if (save) {
           await new Promise(r => setTimeout(r, 700));
@@ -302,10 +315,14 @@ async function main() {
     case 'watch': {
       const file = positional[0]; if (!file) throw new Error('usage: watch <patch.loupe>');
       await withDevice(portArg, async (send, recv) => {
+        await setSwapMode(send, recv);
+        let lastBytes = null;
         const push = async () => {
           try {
             const snapshot = snapshotFromPatch(file);
+            if (lastBytes && Buffer.compare(Buffer.from(snapshot), Buffer.from(lastBytes)) === 0) return;
             await writeState(send, recv, snapshot);
+            lastBytes = snapshot;
             console.log(`${new Date().toLocaleTimeString()}  pushed ${file} (${snapshot.length} B)`);
           } catch (e) { console.error(`${new Date().toLocaleTimeString()}  ${e.message}`); }
         };

@@ -26,6 +26,22 @@ static inline void pack12_write(uint8_t* buf, uint32_t idx, int32_t val) {
 static uint32_t g_last_audio_lens[LENS_MAX_BUFFERS];
 static uint8_t  g_last_audio_count = 0;
 
+/* Same idea for control buffers (registers / short tapes): if the control-buffer
+   geometry is unchanged, their bytes are kept so a same-layout re-send preserves
+   register sample-and-hold values and short-tape contents through a swap. */
+static uint32_t g_last_control_lens[LENS_MAX_BUFFERS];
+static uint8_t  g_last_control_count = 0;
+
+/* ---- Node-state layout preservation ---- */
+/* Signature of the last applied node-state layout: slot_count plus the per-slot
+   kernel-id sequence. Node-state size is a pure function of (slot_count, kernel
+   ids in walk order) -- each slot's state bytes come from its kernel and slots
+   allocate in walk order -- so a matching signature means an identical pool
+   layout, and the live op state (oscillator phases, envelopes, hold registers,
+   pickup takeover values) can survive a re-send instead of being zeroed. */
+static uint32_t g_last_nodestate_sig  = 0;
+static uint8_t  g_have_last_nodestate = 0;
+
 /* ---- Static pools ---- */
 /* Sizes come from runtime.h. Audio pool is 128 KB: 12-bit cells pack 2 per
    3 bytes, so 128 KB / 1.5 = 87381 cells = 1.82 s @ 48 kHz. */
@@ -155,7 +171,7 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
     u16(&c);                           /* version */
     u16(&c);                           /* flags */
     uint16_t sc  = u16(&c);           /* slot_count */
-    u16(&c);                           /* reserved */
+    uint16_t master_idx = u16(&c);    /* master clock walk index (0xFFFF = none) */
     u16(&c);                           /* reserved */
     uint8_t  bc  = u8(&c);            /* buffer_count */
     uint8_t  tc  = u8(&c);            /* terminal_count */
@@ -171,17 +187,16 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
     audio_bump = control_bump = nodestate_bump = 0;
     slot_bump = buffer_bump = terminal_bump = const_bump = 0;
 
-    /* Clear static runtime. NodeState pool included: every kernel's state
-       struct (counters, phase accumulators, last_clk edges) must start at
-       zero so a fresh patch begins from a clean state. Without this, a
-       stale uint32 counter from a previous patch's sine phase can land in
-       a new patch's op_step.counter, sending pack12_read past the end of
-       the tape buffer (4 notes in, 5+ notes out). */
+    /* Clear static runtime + slot/buffer/terminal pools. The node-state pool is
+       cleared in pass 1 instead, conditionally: a changed layout is zeroed (a stale
+       uint32 counter from a previous patch's sine phase landing in a new patch's
+       op_step.counter would send pack12_read past the end of the tape buffer, 4
+       notes in and 5+ notes out), but a same-layout re-send keeps its live op state
+       (see preserve_nodestate below). */
     memset(&g_runtime, 0, sizeof(g_runtime));
     memset(lens_slot_pool,     0, sc * sizeof(struct Slot));
     memset(lens_buffer_pool,   0, bc * sizeof(struct Buffer));
     memset(lens_terminal_pool, 0, tc * sizeof(struct RuntimeTerminal));
-    memset(lens_nodestate_pool, 0, LENS_NODESTATE_BYTES);
 
     struct LensRuntime* rt = &g_runtime;
     /* Seed core1_done to a value Core 0's spin will never mistake for "done":
@@ -191,6 +206,7 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
     rt->slot_count    = sc;
     rt->buffer_count  = bc;
     rt->terminal_count = tc;
+    rt->master_slot_idx = (master_idx < sc) ? master_idx : 0xFFFFu;
 
     rt->slots     = lens_slot_pool;
 
@@ -218,7 +234,7 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
     memset(soff, 0, sc * sizeof(uint32_t));
 
     /* Helper: advance cursor past one slot record, counting pool and const bytes. */
-#define PASS1_SLOT(s1_, pool_, nconst_, wi_) \
+#define PASS1_SLOT(s1_, pool_, nconst_, wi_, sig_) \
     do { \
         if (!ok((s1_), 3)) return -1; \
         uint8_t wkid_ = *(s1_)->p++;  /* kernel_id (wire index) */ \
@@ -226,6 +242,7 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         uint8_t nc_ = *(s1_)->p++;    /* in_count */ \
         if (nc_ > 5) return -5;        /* slots have at most 5 inputs; reject malformed */ \
         uint8_t rkid_ = (wkid_ < kc) ? kkids[wkid_] : KID_UNKNOWN; \
+        (sig_) = ((sig_) * 16777619u) ^ rkid_;  /* FNV-1a step: layout signature */ \
         soff[(wi_)] = (pool_); \
         (pool_) += runtime_kernel_state_bytes(rkid_); \
         for (uint8_t jj_ = 0; jj_ < nc_; jj_++) { \
@@ -249,20 +266,28 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         (s1_)->p += 6; /* out_offset(2) + param0(4) */ \
     } while (0)
 
-    /* Pass 1: walk the flat slot list to size the state pool and count consts. */
+    /* Pass 1: walk the flat slot list to size the state pool and count consts.
+       The same walk accumulates the node-state layout signature. */
+    int preserve_nodestate = 0;
     {
         uint32_t pool = 0;
         uint16_t nconst = 0;
+        uint32_t sig = 2166136261u ^ (uint32_t)sc;   /* FNV-1a offset basis, seeded by slot_count */
         Cur s1 = c;
         for (uint16_t wi = 0; wi < sc; wi++) {
-            PASS1_SLOT(&s1, pool, nconst, wi);
+            PASS1_SLOT(&s1, pool, nconst, wi, sig);
         }
         (void)nconst;  /* a use-count upper bound; the pool dedupes, so the real
                           limit is distinct values, checked as we intern in pass 2. */
+        preserve_nodestate = g_have_last_nodestate && (sig == g_last_nodestate_sig);
+        g_last_nodestate_sig  = sig;
+        g_have_last_nodestate = 1;
         rt->state_pool_size = pool;
         rt->state_pool = alloc_nodestate(pool ? pool : 1);
         if (!rt->state_pool) return -6;
-        memset(rt->state_pool, 0, pool ? pool : 1);
+        /* Same layout -> keep the live bytes (op state survives the swap).
+           Changed layout -> zero, so a stale value cannot land in a new slot. */
+        if (!preserve_nodestate) memset(rt->state_pool, 0, pool ? pool : 1);
         rt->const_pool = lens_const_pool;
         memset(lens_const_pool, 0, sizeof(lens_const_pool));
         rt->const_count = 0;
@@ -434,18 +459,24 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
     /* Collect incoming audio buffer geometry to check against last apply. */
     uint32_t new_audio_lens[LENS_MAX_BUFFERS];
     uint8_t  new_audio_count = 0;
+    uint32_t new_control_lens[LENS_MAX_BUFFERS];
+    uint8_t  new_control_count = 0;
     {
         Cur scan = c;
         for (uint8_t i = 0; i < bc; i++) {
-            if (!ok(&scan, 6)) { new_audio_count = 0; break; }
+            if (!ok(&scan, 6)) { new_audio_count = 0; new_control_count = 0; break; }
             uint8_t  kind  = u8(&scan);
             uint32_t blen  = u32(&scan);
-            uint8_t  seed  = u8(&scan);
-            if (kind == LENS_BUF_KIND_AUDIO && new_audio_count < LENS_MAX_BUFFERS)
-                new_audio_lens[new_audio_count++] = blen;
-            if (seed) {
+            uint8_t  flags = u8(&scan);   /* bit0 = seed present, bit1 = keep */
+            if (kind == LENS_BUF_KIND_AUDIO) {
+                if (new_audio_count < LENS_MAX_BUFFERS)
+                    new_audio_lens[new_audio_count++] = blen;
+            } else if (new_control_count < LENS_MAX_BUFFERS) {
+                new_control_lens[new_control_count++] = blen;
+            }
+            if (flags & 1u) {
                 /* skip seed data: blen * 2 bytes */
-                if (!ok(&scan, (size_t)blen * 2u)) { new_audio_count = 0; break; }
+                if (!ok(&scan, (size_t)blen * 2u)) { new_audio_count = 0; new_control_count = 0; break; }
                 scan.p += (size_t)blen * 2u;
             }
         }
@@ -457,12 +488,20 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         if (new_audio_lens[i] != g_last_audio_lens[i]) geom_same = 0;
     }
 
+    /* Same check for the control buffers (registers / short tapes). */
+    int control_geom_same = (new_control_count == g_last_control_count) && (new_control_count > 0);
+    for (uint8_t i = 0; control_geom_same && i < new_control_count; i++) {
+        if (new_control_lens[i] != g_last_control_lens[i]) control_geom_same = 0;
+    }
+
     rt->buffers = lens_buffer_pool;
     for (uint8_t i = 0; i < bc; i++) {
         if (!ok(&c, 6)) return -1;
-        uint8_t kind = u8(&c);
+        uint8_t kind  = u8(&c);
         uint32_t blen = u32(&c);
-        uint8_t  seed = u8(&c);
+        uint8_t  flags = u8(&c);            /* bit0 = seed present, bit1 = keep */
+        int has_seed = (flags & 1u) != 0;
+        int keep     = (flags & 2u) != 0;
         /* Cap at the audio pool's cell capacity so one buffer can span the whole
            torus (~1.82 s); the bump allocator rejects anything that won't fit. */
         const uint32_t max_cells = (LENS_AUDIO_BUFFER_BYTES * 2u) / 3u;
@@ -470,22 +509,33 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
         rt->buffers[i].length   = blen;
         /* Packed byte storage: (blen * 3 + 1) >> 1 bytes (round up). */
         size_t nbytes = ((size_t)blen * 3u + 1u) >> 1;
+        int pool_preserved;
         uint8_t* bytes;
         if (kind == LENS_BUF_KIND_AUDIO) {
             bytes = alloc_audio(nbytes);
             /* Skip zero-fill if geometry is preserved; content rings through. */
             if (!bytes) return -6;
             if (!geom_same) memset(bytes, 0, nbytes);
+            pool_preserved = geom_same;
         } else {
             bytes = alloc_control(nbytes);
             if (!bytes) return -6;
-            memset(bytes, 0, nbytes);
+            /* Skip zero-fill if control geometry is preserved; register/tape
+               content survives the swap. */
+            if (!control_geom_same) memset(bytes, 0, nbytes);
+            pool_preserved = control_geom_same;
         }
         rt->buffers[i].bytes = bytes;
-        if (seed) {
+        /* A :keep tape skips the seed write when its pool geometry is preserved, so
+           its live-evolved content survives a same-layout swap. Default (no keep) or
+           a changed layout re-applies the seed. The seed bytes are always consumed
+           from the stream to keep the cursor aligned. */
+        int apply_seed = has_seed && !(keep && pool_preserved);
+        if (has_seed) {
             for (uint32_t j = 0; j < blen; j++) {
                 if (!ok(&c, 2)) return -1;
-                pack12_write(bytes, j, (int32_t)(uint16_t)u16(&c));
+                uint16_t v = (uint16_t)u16(&c);
+                if (apply_seed) pack12_write(bytes, j, (int32_t)v);
             }
         }
     }
@@ -494,6 +544,9 @@ int snapshot_apply(struct LensRuntime** out_rt, const uint8_t* bytes, size_t len
     g_last_audio_count = new_audio_count;
     for (uint8_t i = 0; i < new_audio_count; i++)
         g_last_audio_lens[i] = new_audio_lens[i];
+    g_last_control_count = new_control_count;
+    for (uint8_t i = 0; i < new_control_count; i++)
+        g_last_control_lens[i] = new_control_lens[i];
 
     /* Apply buffer fixups. */
     for (uint16_t i = 0; i < nbfix; i++) {

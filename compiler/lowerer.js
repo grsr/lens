@@ -79,6 +79,7 @@ function lower(expanded) {
   const slots = [];
   const buffers = [];
   const terminals = [];
+  let masterSlotId = null;   // slot of the master clock, for beat/bar swaps
 
   // Memoisation: AST node object (by identity) -> lowered Ref.
   const memo = new Map();
@@ -100,10 +101,11 @@ function lower(expanded) {
     return { kind: 'slot', id };
   }
 
-  function allocBuffer(kind, length, seed) {
+  function allocBuffer(kind, length, seed, keep) {
     const id = nextBufId++;
     const entry = { id, kind, length };
     if (seed !== undefined) entry.seed = seed;
+    if (keep) entry.keep = true;
     buffers.push(entry);
     return { kind: 'buffer', id };
   }
@@ -119,6 +121,8 @@ function lower(expanded) {
 
     const ref = lowerNodeInner(node);
     memo.set(node, ref);
+    // Record the master clock's slot (tagged by the expander) for beat/bar swaps.
+    if (node._isMaster && ref && ref.kind === 'slot') masterSlotId = ref.id;
     return ref;
   }
 
@@ -744,7 +748,7 @@ function lower(expanded) {
       if (item.t === 'sym') throw new Error(`unknown name: ${item.s}`);
       return 0;
     });
-    const ref = allocBuffer('tape', seed.length, seed);
+    const ref = allocBuffer('tape', seed.length, seed, node.keep);
     bufMemo.set(node, ref);
     return ref;
   }
@@ -1098,7 +1102,7 @@ function lower(expanded) {
     slot.kernel = kernel;
   }
 
-  return { buffers, slots, terminals };
+  return { buffers, slots, terminals, masterSlotId };
 }
 
 // Sanity check: assert structural invariants on a lowered graph.
